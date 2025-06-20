@@ -1,7 +1,8 @@
 # cascadia
 
 ![Overview](https://raw.githubusercontent.com/noellelaw/cascadia/main/assets/THRUST3_Overview.png)
-This framework (will eventually) support both unconditional and conditional flood generation using 
+
+This framework supports both unconditional and conditional flood generation using 
 diffusion-based backbones and graph-based refinement networks. It enables physically 
 plausible, programmable flood scenario design under varying sea level rise (SLR), 
 storm intensities, and topographic constraints.
