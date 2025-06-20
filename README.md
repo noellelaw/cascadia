@@ -7,10 +7,10 @@ plausible, programmable flood scenario design under varying sea level rise (SLR)
 storm intensities, and topographic constraints.
 
 Applications include:
-    - Generating high-resolution synthetic flood extents across diverse geographic regions
-    - Conditioning flood generation on climate drivers (e.g., SLR, wind fields, rainfall)
-    - Propagating cascading infrastructure failures via graph neural networks
-    - Supporting scenario planning for resilient infrastructure and emergency response
+- Generating high-resolution synthetic flood extents across diverse geographic regions
+- Conditioning flood generation on climate drivers (e.g., SLR, wind fields, rainfall)
+- Propagating cascading infrastructure failures via graph neural networks
+- Supporting scenario planning for resilient infrastructure and emergency response
 
 DDPM Head
 ![DDPM Head](https://raw.githubusercontent.com/noellelaw/cascadia/main/assets/DDPM_Scenario_Overview.png)
