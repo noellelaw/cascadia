@@ -23,4 +23,4 @@ GNN-Design Network for Cascading Failures in Interconnected Infrasructure
 ![GNN B](https://raw.githubusercontent.com/noellelaw/cascadia/main/assets/DDPM_GNN_IIC_Scenario_Overview.png)
 
 
-Code adapted from the protein synthesis space (thank you Chroma: [Paper](https://www.nature.com/articles/s41586-023-06728-8), [GitHub]())
+Code adapted from the protein synthesis space (thank you Chroma: [Paper](https://www.nature.com/articles/s41586-023-06728-8), [GitHub](https://github.com/generatebio/chroma))
