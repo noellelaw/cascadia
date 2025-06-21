@@ -17,7 +17,7 @@ DDPM Head
 ![DDPM Head](https://raw.githubusercontent.com/noellelaw/cascadia/main/assets/DDPM_Scenario_Overview.png)
 
 GNN-Design Network for Flood Propogation in High- and Low-Resource Areas
-![GNN A]((https://raw.githubusercontent.com/noellelaw/cascadia/main/assets/DDPM_GNN_LowResource_Scenario_Overview.png)
+![GNN A](https://raw.githubusercontent.com/noellelaw/cascadia/main/assets/DDPM_GNN_LowResource_Scenario_Overview.png)
 
 GNN-Design Network for Cascading Failures in Interconnected Infrasructure
 ![GNN B](https://raw.githubusercontent.com/noellelaw/cascadia/main/assets/DDPM_GNN_IIC_Scenario_Overview.png)
