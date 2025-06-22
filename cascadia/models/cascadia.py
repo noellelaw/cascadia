@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from cascadia.data.flood import Flood
 from cascadia.layers.structure.backbone import FloodBackbone
-from cascadia.models import graph_backbone, graph_design
+from cascadia.models import graph_backbone, graph_design_for_flood_impact
 
 
 class Cascadia(nn.Module):
@@ -591,10 +591,10 @@ class Cascadia(nn.Module):
         device = next(self.parameters()).device
 
         if isinstance(floods, list):
-            X, C, D = self._flood_list_to_XCD(floods, all_atom=True, device=device)
+            X, C, D = self._flood_list_to_XCD(floods, high_res=True, device=device)
             output_scores = [{} for _ in range(len(floods))]
         else:
-            X, C, D = floods.to_XCD(all_atom=True, device=device)
+            X, C, D = floods.to_XCD(high_res=True, device=device)
             output_scores = {}
 
         # Compute model-based losses
@@ -610,13 +610,13 @@ class Cascadia(nn.Module):
 
         return output_scores
 
-    def _flood_list_to_XCD(self, list_of_floods, all_atom=False, device=None):
+    def _flood_list_to_XCD(self, list_of_floods, high_res=False, device=None):
         """
         Pads and batches a list of Flood objects with varying spatial dimensions.
         """
 
         # Extract tensors
-        Xs, Cs, Ds = zip(*[flood.to_XCD(all_atom=all_atom) for flood in list_of_floods])
+        Xs, Cs, Ds = zip(*[flood.to_XCD(high_res=high_res) for flood in list_of_floods])
 
         # Determine max H, W for padding
         H_max = max(X.shape[-2] for X in Xs)

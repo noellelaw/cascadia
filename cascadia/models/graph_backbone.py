@@ -24,7 +24,7 @@ import torch.nn as nn
 from cascadia.data.xcd import validate_XC
 from cascadia.layers import basic, graph
 from cascadia.layers.structure import backbone, diffusion, transforms
-from cascadia.models.graph_design import BackboneEncoderGNN
+from cascadia.models.graph_design_for_flood_impact import BackboneEncoderGNN
 from cascadia.utility.model import load_model as utility_load_model
 
 
@@ -237,7 +237,7 @@ class GraphBackbone(nn.Module):
         is_spatial = C.ndim == 3  # (B, H, W)
         is_global = C.ndim == 2   # (B, D)
         assert is_spatial or is_global, f"Unsupported C shape: {C.shape}"
-        
+
         time_h = self._time_features(t) if self.use_time_features else None
         node_h = time_h
         edge_h, edge_idx, mask_ij = [None] * 3
@@ -358,6 +358,15 @@ class GraphBackbone(nn.Module):
 
         # Main loss: e.g., squared error or FAPE over grid
         losses = self.loss_diffusion(X0_pred, X, C, t)
+
+        # --- Mass conservation penalty ---
+        # Total predicted water volume vs. true water volume
+        # TODO: Consider doing a weighting for this term? 
+        volume_diff = (X0_pred.sum(dim=(1, 2)) - X.sum(dim=(1, 2))) ** 2  # shape (B,)
+        mass_loss = volume_diff.mean()  # scalar
+
+        # Add to losses dictionary
+        losses["mass_conservation_mse"] = mass_loss
 
         # Per-sample weights based on grid mask (e.g., valid land regions)
         if C.ndim == 3:
