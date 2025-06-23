@@ -79,7 +79,7 @@ class Cascadia(nn.Module):
             weights_backbone, device=device, strict=strict, verbose=verbose
         ).eval()
 
-        self.design_network = graph_design.load_model(
+        self.design_network = graph_design_for_flood_impact.load_model(
             weights_design,
             device=device,
             strict=strict,
@@ -711,33 +711,26 @@ class Cascadia(nn.Module):
 
         return metric_dictionary
 
-    def _init_backbones(self, num_fields: int, grid_shapes: List[Tuple[int, int]]):
+    def _init_backbones(self, num_fields: int, grid_shape: List[Tuple[int, int]]):
         """
         Initialize flood depth maps, land use classes, and metadata as tensors.
 
         Args:
             num_samples (int): Number of flood fields to generate.
-            grid_shapes (List[Tuple[int, int]]): Shape (H, W) of each flood grid.
+            grid_shape (List[Tuple[int, int]]): Shape (H, W) of each flood grid.
 
         Returns:
             Tuple of tensors (X, C, D): depth, land class, metadata.
         """
-        X_list, C_list, D_list = [], [], []
-
-        for shape in grid_shapes:
-            H, W = shape
-            # Random noise initialization for DDPM
-            X = torch.randn((1, H, W))  # flood depth or elevation
-            C = torch.randint(0, 4, (1, H, W))  # land use mask (0–3)
-            D = torch.zeros((1, H, W, 2))  # optional velocity, pressure, etc.
-
-            X_list.append(X)
-            C_list.append(C)
-            D_list.append(D)
-
-        X = torch.cat(X_list, dim=0)
-        C = torch.cat(C_list, dim=0)
-        D = torch.cat(D_list, dim=0)
+        X = FloodBackbone(
+            num_batch=num_fields,
+            num_residues=sum(grid_shape),
+            init_state="alpha",
+        )()
+        C = torch.cat(
+            [torch.full([rep], i + 1) for i, rep in enumerate(grid_shape)]
+        ).expand(X.shape[0], -1)
+        D = torch.zeros_like(C)
 
         device = next(self.parameters()).device
         return [i.to(device) for i in [X, C, D]]
