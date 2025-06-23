@@ -65,7 +65,7 @@ class FloodBackbone(nn.Module):
     def forward(self) -> torch.Tensor:
         X_transformed = self.transform(self.X)
         if self.use_terrain_slope:
-            # Optionally return slope fields for advanced GNN or physics constraints
+            # Or return slope fields for advanced GNN or physics constraints
             return X_transformed, self.slope_x, self.slope_y
         return X_transformed
     
