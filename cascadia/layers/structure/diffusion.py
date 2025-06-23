@@ -29,8 +29,8 @@ import torch.nn.functional as F
 from torch.autograd import grad
 from tqdm.auto import tqdm
 
-from cascadia.constants import NLCD
-from cascadia.data.xcd import validate_XCD
+from cascadia.constants.spatial import NLCD
+from cascadia.data.xcd import validate_XC
 from cascadia.layers import basic, sde
 from cascadia.layers.structure import backbone, rmsd
 
@@ -1553,7 +1553,7 @@ class DiffusionChainCov(nn.Module):
         X_sample = backbone.center_X(X_sample - X, C) + X
         return X_sample
 
-    @validate_XC(all_atom=False)
+    @validate_XC(high_res=False)
     def forward(
         self, X: torch.Tensor, C: torch.LongTensor, t: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:

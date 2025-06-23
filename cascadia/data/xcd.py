@@ -10,9 +10,6 @@ The tensors in an XCD representation are:
 
     `D` (LongTensor), optional land cover classes (e.g., NLCD indices) with
         shape `(num_batch, H, W)`, used for conditioning or auxiliary supervision.
-
-    `O` (FloatTensor), optional one-hot encoding of land cover with shape
-        `(num_batch, H, W, num_classes)`.
 """
 
 from functools import partial, wraps
@@ -21,11 +18,11 @@ from inspect import getfullargspec
 import torch
 from torch.nn import functional as F
 
-def validate_XCD(all_channels=None, sequence=True):
+def validate_XCD(high_res=None, sequence=True):
     """Decorator factory that adds XCD validation to any function.
 
     Args:
-        all_channels (int, optional): If set, checks that the X tensor has this many channels.
+        high_res (int, optional): If set, checks that the X tensor has this many channels.
         sequence (bool, optional): If True, ensures S and O match or are inferred from each other.
     """
 
@@ -56,9 +53,9 @@ def validate_XCD(all_channels=None, sequence=True):
                     raise ValueError(
                         f"X shape {tensors['X'].shape} does not match C shape {tensors['C'].shape}"
                     )
-            if all_channels is not None and tensors["X"] is not None:
-                if tensors["X"].shape[-1] != all_channels:
-                    raise ValueError(f"Expected {all_channels} channels but got {tensors['X'].shape[-1]}")
+            if high_res is not None and tensors["X"] is not None:
+                if tensors["X"].shape[-1] != high_res:
+                    raise ValueError(f"Expected {high_res} channels but got {tensors['X'].shape[-1]}")
 
             if sequence and (tensors["D"] is not None or tensors["O"] is not None):
                 if tensors["O"] is None:

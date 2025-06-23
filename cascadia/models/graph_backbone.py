@@ -106,10 +106,6 @@ class GraphBackbone(nn.Module):
             if key.startswith("__") and key.endswith("__"):
                 self.kwargs.pop(key)
         args = SimpleNamespace(**self.kwargs)
-        # Interpret C as global or spatial
-        is_spatial = C.ndim == 3  # (B, H, W)
-        is_global = C.ndim == 2   # (B, D)
-        assert is_spatial or is_global, f"Unsupported C shape: {C.shape}"
         # Important global options
         self.dim_nodes = args.dim_nodes
         self.dim_edges = args.dim_edges
@@ -431,6 +427,10 @@ def load_model(
     Returns:
         model (GraphBackbone): Instance of `GraphBackbone` with loaded weights.
     """
+    if weight_file=="none":
+        # If no weights are provided, return an uninitialized model
+        return GraphBackbone()
+    
     return utility_load_model(
         weight_file,
         GraphBackbone,

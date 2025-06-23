@@ -83,9 +83,6 @@ def load_model(
     Returns:
         model (nn.Module): Torch model with loaded weights.
     """
-    if weights == "none":
-        model = model_class(**params["init_kwargs"]).to(device)
-        return model
     # Process weights path
     if str(weights).startswith("named:"):
         weights = weights.split("named:")[1]

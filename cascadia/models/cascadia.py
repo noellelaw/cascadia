@@ -56,8 +56,8 @@ class Cascadia(nn.Module):
 
     def __init__(
         self,
-        weights_backbone: str = "named:public",
-        weights_design: str = "named:public",
+        weights_backbone: str = "none",
+        weights_design: str = "none",
         device: Optional[str] = None,
         strict: bool = False,
         verbose: bool = False,
