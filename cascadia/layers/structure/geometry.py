@@ -42,3 +42,68 @@ class VirtualNodes(nn.Module):
     def forward(self, X: torch.Tensor):
         # X: (B, H, W, 2)=position of each grid cell
         return X + self.offset.to(X.device)
+
+def normed_vec(V: torch.Tensor, distance_eps: float = 1e-3) -> torch.Tensor:
+    """Normalized vectors with distance smoothing.
+
+    This normalization is computed as `U = V / sqrt(|V|^2 + eps)` to avoid cusps
+    and gradient discontinuities.
+
+    Args:
+        V (Tensor): Batch of vectors with shape `(..., num_dims)`.
+        distance_eps (float, optional): Distance smoothing parameter for
+            for computing distances as `sqrt(sum_sq) -> sqrt(sum_sq + eps)`.
+            Default: 1E-3.
+
+    Returns:
+        U (Tensor): Batch of normalized vectors with shape `(..., num_dims)`.
+    """
+    # Unit vector from i to j
+    mag_sq = (V ** 2).sum(dim=-1, keepdim=True)
+    mag = torch.sqrt(mag_sq + distance_eps)
+    U = V / mag
+    return U
+
+def normed_cross(
+    V1: torch.Tensor, V2: torch.Tensor, distance_eps: float = 1e-3
+) -> torch.Tensor:
+    """Normalized cross product between vectors.
+
+    This normalization is computed as `U = V / sqrt(|V|^2 + eps)` to avoid cusps
+    and gradient discontinuities.
+
+    Args:
+        V1 (Tensor): Batch of vectors with shape `(..., 3)`.
+        V2 (Tensor): Batch of vectors with shape `(..., 3)`.
+        distance_eps (float, optional): Distance smoothing parameter for
+            for computing distances as `sqrt(sum_sq) -> sqrt(sum_sq + eps)`.
+            Default: 1E-3.
+
+    Returns:
+        C (Tensor): Batch of cross products `v_1 x v_2` with shape `(..., 3)`.
+    """
+    C = normed_vec(torch.cross(V1, V2, dim=-1), distance_eps=distance_eps)
+    return C
+
+
+def frames_from_backbone(X: torch.Tensor, distance_eps: float = 1e-3):
+    """Convert a backbone into local reference frames.
+
+    Args:
+        X (Tensor): Backbone coordinates with shape `(..., 4, 3)`.
+        distance_eps (float, optional): Distance smoothing parameter for
+            for computing distances as `sqrt(sum_sq) -> sqrt(sum_sq + eps)`.
+            Default: 1E-3.
+
+    Returns:
+        R (Tensor): Reference frames with shape `(..., 3, 3)`.
+        X_CA (Tensor): C-alpha coordinates with shape `(..., 3)`
+    """
+    X_N, X_CA, X_C, X_O = X.unbind(-2)
+    u_CA_N = normed_vec(X_N - X_CA, distance_eps)
+    u_CA_C = normed_vec(X_C - X_CA, distance_eps)
+    n_1 = u_CA_N
+    n_2 = normed_cross(n_1, u_CA_C, distance_eps)
+    n_3 = normed_cross(n_1, n_2, distance_eps)
+    R = torch.stack([n_1, n_2, n_3], -1)
+    return R, X_CA

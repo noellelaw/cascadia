@@ -4,8 +4,9 @@
 
 import torch
 import torch.nn as nn
+from cascadia import constants
 
-class SideChainBuilder(nn.Module):
+class FloodFieldBuilder(nn.Module):
     """Reconstructs full flood fields from backbone depth and categorical attributes."""
     def forward(self, X_backbone, D):
         # Placeholder: Add transformation logic to reconstruct flood field
@@ -48,7 +49,7 @@ class LossFloodfieldClashes(nn.Module):
 class FloodField(nn.Module):
     def __init__(self):
         super().__init__()
-        self.field_to_X = SideChainBuilder()
+        self.field_to_X = FloodFieldBuilder()
         self.X_to_field = FieldAngles()
         self.loss_rmsd = LossFloodfieldRMSD()
         self.loss_clash = LossFloodfieldClashes()
@@ -62,3 +63,30 @@ class FloodField(nn.Module):
         rmsd = self.loss_rmsd(X_pred, X_true, mask)
         clash = self.loss_clash(X_pred)
         return {"rmsd": rmsd, "clash": clash}
+
+def _gather_grid_square_mask(C, S, atoms_per_aa, num_atoms):
+    device = S.device
+    atoms_per_aa = torch.tensor(atoms_per_aa, dtype=torch.long)
+    atoms_per_aa = atoms_per_aa.to(device).unsqueeze(0).expand(S.shape[0], -1)
+
+    # (B,A) @ (B,L)  => (B,L)
+    atoms_per_residue = torch.gather(atoms_per_aa, -1, S)
+    atoms_per_residue = (C > 0).float() * atoms_per_residue
+
+    ix_expand = torch.arange(num_atoms, device=device).reshape([1, 1, -1])
+    mask_atoms = ix_expand < atoms_per_residue.unsqueeze(-1)
+    mask_atoms = mask_atoms.float()
+    return mask_atoms
+
+def grid_square_mask(C, D):
+    """Constructs a all-atom coordinate mask from a sequence and chain map.
+
+    Inputs:
+        C (tensor): Chain map with shape `(batch_size, HxW)`.
+        D (tensor): Descriptor tokens with shape `(batch_size, HxW)`.
+
+    Outputs:
+        mask_atoms (tensor): Atomic mask with shape
+            `(batch_size, num_residues, 16)`.
+    """
+    return _gather_grid_square_mask(C, D, constants.NLCD, 16)
