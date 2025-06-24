@@ -15,6 +15,10 @@ from cascadia.data.xcd import validate_XC
 from cascadia.layers import complexity, graph
 from cascadia.layers.structure import diffusion, potts, flood_graph, floodfield
 from cascadia.utility.model import load_model as utility_load_model
+from cascadia.layers.structure.flood_graph_highres import (
+    EdgeFloodfieldsDirect,
+    NodeFieldRBF,
+)
 
 # Placeholder: need to replace with full FloodFeatureGraph
 class FloodGraphDesign(nn.Module):
@@ -1409,7 +1413,7 @@ class FloodfieldDecoderGNN(nn.Module):
                     dim_out=args.dim_edges, num_field=4, num_field_bins=args.num_field_bins
                 )
             elif self.floodfield_embedding == "X_direct":
-                self.embed_X = EdgeFlooodfieldsDirect(dim_out=dim_edges)
+                self.embed_X = EdgeFloodfieldsDirect(dim_out=dim_edges)
             elif self.floodfield_embedding == "mixed_field_X":
                 self.embed_field = NodefieldRBF(
                     dim_out=args.dim_edges, num_field=4, num_field_bins=args.num_field_bins
@@ -1771,7 +1775,7 @@ class FloodfieldDecoderGNN(nn.Module):
         ) = graph.permute_graph_embeddings(
             node_h, edge_h, edge_idx, mask_i, mask_ij, permute_idx
         )
-        field, mask_field = self.X_to_field(X, C, S)
+        field, mask_field = self.X_to_field(X, C, D)
 
         # Build autoregressive mask
         mask_ij_p = graph.edge_mask_causal(edge_idx_p, mask_ij_p)
@@ -1784,7 +1788,7 @@ class FloodfieldDecoderGNN(nn.Module):
             "X_p": graph.permute_tensor(X, 1, permute_idx),
             "C_p": graph.permute_tensor(C, 1, permute_idx),
             "idx_p": graph.permute_tensor(idx, 1, permute_idx),
-            "D_p": torch.zeros_like(S),
+            "D_p": torch.zeros_like(D),
             "field_p": torch.zeros([B, N, 4], device=device),
             "h_D_p": torch.zeros([B, N, self.dim_edges], device=device),
             "h_field_p": torch.zeros([B, N, self.dim_edges], device=device),
@@ -1932,10 +1936,10 @@ class NodePredictorD(nn.Module):
         self, D: torch.LongTensor, node_h: torch.Tensor, mask_i: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Evaluate field angle joint likelihood given graph embeddings."""
-        log_probs_D = self.log_probs_S(node_h, mask_i)
+        log_probs_D = self.log_probs_D(node_h, mask_i)
 
         if self.training:
-            logp_D = -self.training_loss(log_probs_D.permute([0, 2, 1]), S)
+            logp_D = -self.training_loss(log_probs_D.permute([0, 2, 1]), D)
         else:
             logp_D = torch.gather(log_probs_D, 2, D.unsqueeze(-1)).squeeze(-1)
 

@@ -71,7 +71,7 @@ class NodeFieldRBF(nn.Module):
         return h_field
 
 
-class EdgeFloodfieldDirect(nn.Module):
+class EdgeFloodfieldsDirect(nn.Module):
     """Layers for direct encoding of side chain geometries.
 
     Args:
@@ -105,7 +105,7 @@ class EdgeFloodfieldDirect(nn.Module):
         fourier_order=2,
         basis_type="rff",
     ):
-        super(EdgeFloodfieldDirect, self).__init__()
+        super(EdgeFloodfieldsDirect, self).__init__()
         self.dim_out = dim_out
         self.length_scale = length_scale
         self.distance_eps = distance_eps
