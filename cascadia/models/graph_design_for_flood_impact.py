@@ -14,10 +14,6 @@ from cascadia import constants
 from cascadia.data.xcd import validate_XC
 from cascadia.layers import complexity, graph
 from cascadia.layers.structure import diffusion, potts, flood_graph, floodfield
-from cascadia.layers.structure.flood_graph_alldata import (
-    EdgeSidechainsDirect,
-    NodefieldRBF,
-)
 from cascadia.utility.model import load_model as utility_load_model
 
 # Placeholder: need to replace with full FloodFeatureGraph
@@ -206,7 +202,7 @@ class FloodGraphDesign(nn.Module):
         self.num_field_bins = num_field_bins
         self.separate_packing = separate_packing
         self.floodfields = floodfields
-        self.predict_S_potts = predict_S_potts
+        self.predict_S_potts = predict_D_potts
         self.traversal = FloodTraversalSpatial()
 
         # Encoder GNN process backbone
@@ -618,7 +614,7 @@ class FloodGraphDesign(nn.Module):
                 m.sum(dim=tuple(range(1, l.dim()))) + self.loss_eps
             )
         mask_D = o["mask_i"]
-        neglogp_D = -_avg(mask_S, o["logp_D"])
+        neglogp_D = -_avg(mask_D, o["logp_D"])
         neglogp_field = -_avg(o["mask_field"], o["logp_field"])
         neglogp = neglogp_D + neglogp_field
         if o["logp_D_marginals"] is not None:
@@ -842,9 +838,9 @@ class FloodGraphDesign(nn.Module):
             # Sample sequence (and field angles if one-stage)
 
             # Complexity regularization
-            bias_S_func = None
+            bias_D_func = None
             if regularization == "LCP":
-                bias_S_func = complexity.complexity_scores_lcp_t
+                bias_D_func = complexity.complexity_scores_lcp_t
 
             D_sample, field_sample, logp_D, logp_field, _ = self.decoder.decode(
                 X,
@@ -863,7 +859,7 @@ class FloodGraphDesign(nn.Module):
                 resample_field=resample_field,
                 top_p_D=top_p_D,
                 ban_D=ban_D,
-                bias_S_func=bias_S_func,
+                bias_S_func=bias_D_func,
             )
 
         if self.separate_packing:
@@ -1206,7 +1202,6 @@ class BackboneEncoderGNN(nn.Module):
         else:
             return module(*args)
 
-
 class FloodTraversalSpatial(nn.Module):
     """Samples spatially correlated permutations over a flood-prone area.
 
@@ -1270,7 +1265,611 @@ class FloodTraversalSpatial(nn.Module):
 
         permute_idx = torch.argsort(z, dim=-1)
         return permute_idx
+
+class FloodfieldDecoderGNN(nn.Module):
+    """Autoregressively generate floodfields given backbone graph embeddings.
+
+    Args:
+        See documention of `structure.protein_graph.ProteinFeatureGraph`,
+        and `graph.GraphNN` for more details.
+
+        dim_nodes (int): Hidden dimension of node tensors.
+        dim_edges (int): Hidden dimension of edge tensors.
+        num_neighbors (int): Number of neighbors per nodes.
+        predict_D (bool): Whether to predict land descriptors.
+        predict_field (bool): Whether to predict field angles. I still dont really understand this
+            but I dont have to rn. 
+        sequence_embedding (str): How to represent sequence when decoding.
+            Currently the only option is `linear`.
+        floodfield_embedding (str): How to represent field angles when decoding.
+            Options include `field_linear` for a simple linear layer, `field_rbf`
+            for a featurization based on smooth binning of field angles,
+            `X_direct` which directly encodes the high-res flood coordinates using
+            random Fourier features, and `mixed_field_X` which uses both the
+            featurizations of `field_rbf` and of `X_direct`.
+        num_layers (int): Number of layers.
+        node_mlp_layers (int): Number of hidden layers for node update
+            function.
+        node_mlp_dim (int, optional): Dimension of hidden layers for node update
+            function, defaults to match output dimension.
+        edge_update (bool): Whether to include an edge update step.
+        edge_mlp_layers (int): Number of hidden layers for edge update
+            function.
+        edge_mlp_dim (int, optional): Dimension of hidden layers for edge update
+            function, defaults to match output dimension.
+        skip_connect_input (bool): Whether to include skip connections between
+            layers.
+        mlp_activation (str): MLP nonlinearity function, `relu` or `softplus`
+            accepted.
+        dropout (float): Dropout fraction.
+        num_landcover_classes (int): Number of possible residues.
+        num_field_bins (int): Number of field bins for smooth binning of field angles
+            used when `floodfield_embedding` is `field_rbf` or `mixed_field_X`.
+        decoder_num_hidden (int): Dimension of hidden layers.
+        label_smoothing (float): Level of smoothing to apply to sequence and
+            floodfield labels.
+
+    Inputs:
+        X (torch.Tensor): Backbone coordinates with shape
+                `(num_batch, H, W, 1)`.
+        C (torch.LongTensor): SLR / Meteorological map with shape `(num_batch, H, W, K)`.
+        D (torch.LongTensor): Land descriptor tensor with shape
+            `(num_batch, H, W, 1)`.
+        node_h (torch.Tensor): Node features with shape
+            `(num_batch, HxW, dim_nodes)`. # wondering if H should really be HxW???
+        edge_h (torch.Tensor): Edge features with shape
+            `(num_batch, HxW, num_neighbors, dim_edges)`.
+        edge_idx (torch.LongTensor): Edge indices for neighbors with shape
+            `(num_batch, num_residues, num_neighbors)`.
+        mask_i (torch.Tensor): Node mask with shape
+            `(num_batch, num_residues)`.
+        mask_ij (torch.Tensor): Edge mask with shape
+             `(num_batch, num_nodes, num_neighbors)`.
+        permute_idx (torch.LongTensor): Permutation tensor for fixing the
+            autoregressive decoding order `(num_batch, num_residues)`. If
+            `None` (default), a random decoding order will be generated.
+
+    Outputs:
+        logp_D (torch.Tensor): Sequence log likelihoods per gridcell with shape
+            `(num_batch, HxW)`.
+        logp_field (torch.Tensor): Field angle Log likelihoods per residue with
+            shape `(num_batch, num_residues, 4)`.
+        field (torch.Tensor): floodfield field angles in radians with shape
+            `(num_batch, num_residues, 4)`.
+        mask_field (torch.Tensor): Mask for field angles with shape
+            `(num_batch, num_residues, 4)`.
+        node_h (torch.Tensor): Node features with shape
+            `(num_batch, num_residues, dim_nodes)`.
+        edge_h (torch.Tensor): Edge features with shape
+            `(num_batch, num_residues, num_neighbors, dim_edges)`.
+        edge_idx (torch.LongTensor): Edge indices for neighbors with shape
+            `(num_batch, num_residues, num_neighbors)`.
+        mask_i (torch.Tensor): Node mask with shape `(num_batch, num_residues)`.
+        mask_ij (torch.Tensor): Edge mask with shape
+             `(num_batch, num_nodes, num_neighbors)`.
+    """
+
+    def __init__(
+        self,
+        dim_nodes: int = 128,
+        dim_edges: int = 128,
+        num_neighbors: int = 30,
+        predict_D: bool = True,
+        predict_field: bool = True,
+        sequence_embedding: str = "linear",
+        floodfield_embedding: str = "mixed_field_X",
+        num_layers: int = 3,
+        node_mlp_layers: int = 1,
+        node_mlp_dim: Optional[int] = None,
+        edge_update: bool = True,
+        edge_mlp_layers: int = 1,
+        edge_mlp_dim: Optional[int] = None,
+        skip_connect_input: bool = False,
+        mlp_activation: str = "softplus",
+        dropout: float = 0.1,
+        num_landcover_classes: int = 20,
+        num_field_bins: int = 20,
+        decoder_num_hidden: int = 512,
+        label_smoothing: float = 0.1,
+        checkpoint_gradients: bool = False,
+        **kwargs
+    ):
+        super(FloodfieldDecoderGNN, self).__init__()
+
+        # Save configuration in kwargs
+        self.kwargs = locals()
+        self.kwargs.pop("self")
+        for key in list(self.kwargs.keys()):
+            if key.startswith("__") and key.endswith("__"):
+                self.kwargs.pop(key)
+        args = SimpleNamespace(**self.kwargs)
+
+        # Important global options
+        self.dim_nodes = dim_nodes
+        self.dim_edges = dim_edges
+        self.num_landcover_classes = num_landcover_classes
+        self.num_field_bins = num_field_bins
+
+        # Predict D, field or both?
+        assert predict_D or predict_field
+        self.predict_D = predict_D
+        self.predict_field = predict_field
+
+        self.sequence_embedding = sequence_embedding
+        self.floodfield_embedding = floodfield_embedding
+        if self.sequence_embedding == "linear":
+            self.W_D = nn.Embedding(num_landcover_classes, dim_edges)
+
+        # If we are predicting field angles, then embed them
+        if self.predict_field:
+            if self.floodfield_embedding == "field_linear":
+                self.W_field = nn.Linear(8, dim_edges)
+            elif self.floodfield_embedding == "field_rbf":
+                self.embed_field = NodeFieldRBF(
+                    dim_out=args.dim_edges, num_field=4, num_field_bins=args.num_field_bins
+                )
+            elif self.floodfield_embedding == "X_direct":
+                self.embed_X = EdgeFlooodfieldsDirect(dim_out=dim_edges)
+            elif self.floodfield_embedding == "mixed_field_X":
+                self.embed_field = NodefieldRBF(
+                    dim_out=args.dim_edges, num_field=4, num_field_bins=args.num_field_bins
+                )
+                self.embed_X = EdgeFloodfieldsDirect(dim_out=dim_edges, basis_type="rff")
+
+        # Decoder GNN process backbone
+        self.gnn = graph.GraphNN(
+            dim_nodes=args.dim_nodes,
+            dim_edges=args.dim_edges,
+            num_layers=args.num_layers,
+            node_mlp_layers=args.node_mlp_layers,
+            node_mlp_dim=args.node_mlp_dim,
+            edge_update=args.edge_update,
+            edge_mlp_layers=args.edge_mlp_layers,
+            edge_mlp_dim=args.edge_mlp_dim,
+            mlp_activation=args.mlp_activation,
+            dropout=args.dropout,
+            norm="transformer",
+            scale=args.num_neighbors,
+            skip_connect_input=args.skip_connect_input,
+            checkpoint_gradients=checkpoint_gradients,
+        )
+
+        if self.predict_D:
+            self.decoder_D = NodePredictorD(
+                num_landcover_classes=args.num_landcover_classes,
+                dim_nodes=args.dim_nodes,
+                dim_hidden=args.decoder_num_hidden,
+                label_smoothing=args.label_smoothing,
+            )
+
+        if self.predict_field:
+            self.decoder_field = NodePredictorField(
+                num_landcover_classes=args.num_landcover_classes,
+                num_field_bins=args.num_field_bins,
+                dim_nodes=args.dim_nodes,
+                dim_hidden=args.decoder_num_hidden,
+                label_smoothing=args.label_smoothing,
+            )
+
+        self.loss_eps = 1e-5
+        self.field_to_X = floodfield.FloodFieldBuilder()
+        self.X_to_field = floodfield.FieldAngles()
     
+    @validate_XC()
+    def forward(
+        self,
+        X: torch.Tensor,
+        C: torch.LongTensor,
+        D: torch.LongTensor,
+        node_h: torch.Tensor,
+        edge_h: torch.Tensor,
+        edge_idx: torch.LongTensor,
+        mask_i: torch.Tensor,
+        mask_ij: torch.Tensor,
+        permute_idx: torch.LongTensor,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.LongTensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Predict descriptor and field angles autoregressively given graph features."""
+
+        # Permute graph representation
+        (
+            node_h_p,
+            edge_h_p,
+            edge_idx_p,
+            mask_i_p,
+            mask_ij_p,
+        ) = graph.permute_graph_embeddings(
+            node_h, edge_h, edge_idx, mask_i, mask_ij, permute_idx
+        )
+
+        # Permute sequence and side chain field angles
+        X_p = graph.permute_tensor(X, 1, permute_idx)
+        C_p = graph.permute_tensor(C, 1, permute_idx)
+        D_p = graph.permute_tensor(D, 1, permute_idx) # Hmmm
+        field, mask_field = self.X_to_field(X, C, D)
+        field_p = graph.permute_tensor(field, -2, permute_idx)
+
+        # Decode system autoregressively in the permuted coordinates
+        node_h_p, edge_h_p, edge_idx_p, mask_i_p, mask_ij_p = self._decode_inner(
+            X_p, C_p, D_p, field_p, node_h_p, edge_h_p, edge_idx_p, mask_i_p, mask_ij_p
+        )
+
+        # Unpermute graph representation
+        permute_idx_inverse = torch.argsort(permute_idx, dim=-1)
+        node_h, edge_h, edge_idx, mask_i, mask_ij = graph.permute_graph_embeddings(
+            node_h_p, edge_h_p, edge_idx_p, mask_i_p, mask_ij_p, permute_idx_inverse
+        )
+
+        # Predict per-position joint probabilities of each side-chain's sequence and structure
+        logp_D, log_probs_D, logp_field, log_probs_field = None, None, None, None
+        if self.predict_D:
+            (logp_D, log_probs_d,) = self.decoder_D(D, node_h, mask_i)
+        if self.predict_field:
+            (logp_field, log_probs_field,) = self.decoder_field(
+                D, field, mask_field, node_h, mask_i
+            )
+        return (
+            logp_D,
+            logp_field,
+            field,
+            mask_field,
+            node_h,
+            edge_h,
+            edge_idx,
+            mask_i,
+            mask_ij,
+        )
+    
+    def _decode_inner(
+        self, X_p, C_p, D_p, field_p, node_h_p, edge_h_p, edge_idx_p, mask_i_p, mask_ij_p
+    ):
+        # Build autoregressive mask
+        mask_ij_p = graph.edge_mask_causal(edge_idx_p, mask_ij_p)
+
+        # Add sequence context
+        h_D_p = self.W_D(D_p)
+        h_D_p_ij = graph.collect_neighbors(h_D_p, edge_idx_p)
+        edge_h_p = edge_h_p + mask_ij_p.unsqueeze(-1) * h_D_p_ij
+
+        # Add side chain context
+        if self.predict_field:
+            if self.floodfield_embedding in ["field_rbf", "mixed_field_X"]:
+                h_field_p = self.embed_field(field_p)
+                h_field_p_ij = graph.collect_neighbors(h_field_p, edge_idx_p)
+                edge_h_p = edge_h_p + mask_ij_p.unsqueeze(-1) * h_field_p_ij
+
+            if self.floodfield_embedding == "mixed_field_X":
+                edge_feature = self.embed_X(X_p, C_p, D_p, edge_idx_p)
+                edge_h_p = edge_h_p + mask_ij_p.unsqueeze(-1) * edge_feature
+
+        # Run decoder GNN in parallel (permuted)
+        node_h_p, edge_h_p = self.gnn(
+            node_h_p, edge_h_p, edge_idx_p, mask_i_p, mask_ij_p
+        )
+        return node_h_p, edge_h_p, edge_idx_p, mask_i_p, mask_ij_p
+    
+    def _decode_scatter(self, tensor, src, t):
+        """Decoding utility function: Scatter."""
+        idx = (t * torch.ones_like(src)).long()
+        tensor.scatter_(1, idx, src)
+
+    def _decode_pre_func(self, t, tensors_t):
+        """Decoding pre-step function adds features based on current D and field."""
+        _scatter_t = lambda tensor, src: self._decode_scatter(tensor, src, t)
+
+        # Gather relevant tensors at step t
+        edge_h_p_t = tensors_t["edge_h_cache"][0][:, t, :, :].unsqueeze(1)
+        edge_idx_p_t = tensors_t["edge_idx"][:, t, :].unsqueeze(1)
+        mask_ij_p_t = tensors_t["mask_ij"][:, t, :].unsqueeze(1)
+
+        # Update the edge embeddings at t with the relevant context
+        mask_ij_p_t = mask_ij_p_t.unsqueeze(-1)
+
+        # Add sequence context
+        h_D_p_ij_t = graph.collect_neighbors(tensors_t["h_D_p"], edge_idx_p_t)
+        edge_h_p_t = edge_h_p_t + mask_ij_p_t * h_D_p_ij_t
+
+        # Add field context
+        if self.predict_field:
+            if self.floodfield_embedding in ["field_rbf", "mixed_field_X"]:
+                h_field_p_ij_t = graph.collect_neighbors(
+                    tensors_t["h_field_p"], edge_idx_p_t
+                )
+                edge_h_p_t = edge_h_p_t + mask_ij_p_t * h_field_p_ij_t
+            if self.floodfield_embedding == "mixed_field_X":
+                h_field_p_ij_t = self.embed_X.step(
+                    t,
+                    tensors_t["X_p"],
+                    tensors_t["C_p"],
+                    tensors_t["D_p"],
+                    edge_idx_p_t,
+                )
+                edge_h_p_t = edge_h_p_t + mask_ij_p_t * h_field_p_ij_t
+
+        _scatter_t(tensors_t["edge_h_cache"][0], edge_h_p_t)
+        return tensors_t
+    
+    def _decode_post_func(
+        self,
+        t,
+        tensors_t,
+        D_p_input,
+        field_p_input,
+        temperature_D,
+        temperature_field,
+        sample,
+        resample_field,
+        mask_sample,
+        mask_sample_p=None,
+        top_p_D=None,
+        ban_D=None,
+        bias_D_func=None,
+    ):
+        """Decoding post-step function updates D and field."""
+        _scatter_t = lambda tensor, src: self._decode_scatter(tensor, src, t)
+
+        # Gather relevant tensors at step t
+        C_p_t = tensors_t["C_p"][:, t].unsqueeze(1)
+        edge_h_p_t = tensors_t["edge_h_cache"][0][:, t, :, :].unsqueeze(1)
+        edge_idx_p_t = tensors_t["edge_idx"][:, t, :].unsqueeze(1)
+        mask_i_p_t = tensors_t["mask_i"][:, t].unsqueeze(1)
+        mask_ij_p_t = tensors_t["mask_ij"][:, t, :].unsqueeze(1)
+        node_h_p_t = tensors_t["node_h_cache"][-1][:, t, :].unsqueeze(1)
+        idx_p_t = tensors_t["idx_p"][:, t].unsqueeze(1)
+
+        # Sample updated sequence
+        D_p_t = D_p_input[:, t].unsqueeze(1).clone()
+        if self.predict_D and sample:
+            bias_D = None
+            if bias_D_func is not None:
+                bias_D = bias_D_func(
+                    t,
+                    tensors_t["D_p"],
+                    tensors_t["C_p"],
+                    tensors_t["idx_p"],
+                    edge_idx_p_t,
+                    mask_ij_p_t,
+                )
+            mask_D_t = None
+            if mask_sample_p is not None:
+                mask_D_t = mask_sample_p[:, t]
+            D_p_t = self.decoder_D.sample(
+                node_h_p_t,
+                mask_i_p_t,
+                temperature=temperature_D,
+                top_p=top_p_D,
+                bias=bias_D,
+                mask_S=mask_D_t,
+            )
+
+        _scatter_t(tensors_t["D_p"], D_p_t)
+
+        # Sample updated side chain conformations
+        mask_field_p_t = floodfield.field_mask(C_p_t, D_p_t)
+        field_p_t = field_p_input[:, t].unsqueeze(1).clone()
+        if self.predict_field and sample:
+            # Sample field angles
+            field_p_t_sample = self.decoder_field.sample(
+                D_p_t, mask_field_p_t, node_h_p_t, mask_i_p_t, temperature=temperature_field
+            )
+
+            if mask_sample_p is not None and not resample_field:
+                m = mask_sample_p[:, t].unsqueeze(-1).expand([-1, 4])
+                field_p_t = torch.where(m > 0, field_p_t_sample, field_p_t)
+            else:
+                field_p_t = field_p_t_sample
+
+            # Rebuild side chain
+            X_p_t_bb = tensors_t["X_p"][:, t, :4, :].unsqueeze(1)
+            X_p_t, _ = self.field_to_X(X_p_t_bb, C_p_t, D_p_t, field_p_t)
+            _scatter_t(tensors_t["X_p"], X_p_t)
+        _scatter_t(tensors_t["field_p"], field_p_t)
+
+        # Score the updated sequence and field angles
+        if self.predict_D:
+            logp_D_p_t, _ = self.decoder_D(D_p_t, node_h_p_t, mask_i_p_t)
+            _scatter_t(tensors_t["logp_D_p"], logp_D_p_t)
+        if self.predict_field:
+            logp_field_p_t, _ = self.decoder_field(
+                D_p_t, field_p_t, mask_field_p_t, node_h_p_t, mask_i_p_t
+            )
+            _scatter_t(tensors_t["logp_field_p"], logp_field_p_t)
+
+        # Update sequence and field features (permuted)
+        h_D_p_t = self.W_D(D_p_t)
+        _scatter_t(tensors_t["h_D_p"], h_D_p_t)
+
+        # Cache field embeddings
+        if self.predict_field and self.floodfield_embedding in ["field_rbf", "mixed_field_X"]:
+            h_field_p_t = self.embed_field(field_p_t)
+            _scatter_t(tensors_t["h_field_p"], h_field_p_t)
+        return tensors_t
+    
+    @validate_XC()
+    def decode(
+        self,
+        X: torch.Tensor,
+        C: torch.LongTensor,
+        D: torch.LongTensor,
+        node_h: torch.Tensor,
+        edge_h: torch.Tensor,
+        edge_idx: torch.LongTensor,
+        mask_i: torch.Tensor,
+        mask_ij: torch.Tensor,
+        permute_idx: torch.LongTensor,
+        temperature_D: float = 0.1,
+        temperature_field: float = 1e-3,
+        sample: bool = True,
+        mask_sample: Optional[torch.Tensor] = None,
+        resample_field: bool = True,
+        top_p_D: Optional[float] = None,
+        ban_D: Optional[tuple] = None,
+        bias_D_func: Optional[Callable] = None,
+    ) -> Tuple[torch.LongTensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        """Autoregressively decode sequence and field angles from graph features.
+
+        Args:
+            X (torch.Tensor): Backbone coordinates with shape
+                `(num_batch, num_residues, num_atoms, 3)`.
+            C (torch.LongTensor): Field map with shape
+                `(num_batch, num_residues)`.
+            D (torch.LongTensor): Descriptor tensor with shape
+                `(num_batch, num_residues)`.
+            node_h (torch.Tensor): Node features with shape
+                `(num_batch, num_residues, dim_nodes)`.
+            edge_h (torch.Tensor): Edge features with shape
+                `(num_batch, num_residues, num_neighbors, dim_edges)`.
+            edge_idx (torch.LongTensor): Edge indices for neighbors with shape
+                `(num_batch, num_residues, num_neighbors)`.
+            mask_i (torch.Tensor): Node mask with shape
+                `(num_batch, num_residues)`.
+            mask_ij (torch.Tensor): Edge mask with shape
+                 `(num_batch, num_nodes, num_neighbors)`.
+            temperature_field (float): Temperature parameter for sampling field
+                angles. Even if a high temperature sequence is sampled, this is
+                recommended to always be low. Default is `1E-3`.
+            sample (bool): Whether to sample sequence and field angles.
+            mask_sample (torch.Tensor, optional): Binary tensor mask indicating
+                positions to be sampled with shape `(num_batch, num_residues)`.
+                If `None` (default), all positions will be sampled.
+            resample_field (bool): If `True`, all field angles will be resampled,
+                even for sequence positions that were not sampled (i.e. global
+                repacking). Default is `True`.
+            top_p_D (float, optional): Top-p cutoff for Nucleus Sampling, see
+                Holtzman et al ICLR 2020.
+            ban_D (tuple, optional): An optional set of token indices from
+                `chroma.constants.AA20` to ban during sampling.
+
+        Returns:
+            D (torch.LongTensor): Descriptor tensor with shape
+                `(num_batch, num_residues)`.
+            field (torch.Tensor): field angles with shape
+                `(num_batch, num_residues, 4)`.
+            logp_D (torch.Tensor): Sequence log likelihoods per residue with
+                shape `(num_batch, num_residues)`.
+            logp_field (torch.Tensor): field angle Log likelihoods per residue with
+                shape `(num_batch, num_residues, 4)`.
+            tensors (dict): Processed tensors from GNN decoding.
+        """
+
+        # Permute graph representation
+        (
+            node_h_p,
+            edge_h_p,
+            edge_idx_p,
+            mask_i_p,
+            mask_ij_p,
+        ) = graph.permute_graph_embeddings(
+            node_h, edge_h, edge_idx, mask_i, mask_ij, permute_idx
+        )
+        field, mask_field = self.X_to_field(X, C, S)
+
+        # Build autoregressive mask
+        mask_ij_p = graph.edge_mask_causal(edge_idx_p, mask_ij_p)
+
+        # Initialize tensors
+        B, N, K = list(edge_idx.shape)
+        device = node_h.device
+        idx = torch.arange(end=N, device=device)[None, :].expand(C.shape)
+        tensors_init = {
+            "X_p": graph.permute_tensor(X, 1, permute_idx),
+            "C_p": graph.permute_tensor(C, 1, permute_idx),
+            "idx_p": graph.permute_tensor(idx, 1, permute_idx),
+            "D_p": torch.zeros_like(S),
+            "field_p": torch.zeros([B, N, 4], device=device),
+            "h_D_p": torch.zeros([B, N, self.dim_edges], device=device),
+            "h_field_p": torch.zeros([B, N, self.dim_edges], device=device),
+            "node_h": node_h_p,
+            "edge_h": edge_h_p,
+            "edge_idx": edge_idx_p,
+            "mask_i": mask_i_p,
+            "mask_ij": mask_ij_p,
+            "logp_D_p": torch.zeros([B, N], device=device),
+            "logp_field_p": torch.zeros([B, N, 4], device=device),
+        }
+
+        # As a sanity check against future state leakage,
+        # we initialize D and field and zero and write in the true value
+        # during sequential decoding
+        D_p_input = graph.permute_tensor(D, 1, permute_idx)
+        field_p_input = graph.permute_tensor(field, 1, permute_idx)
+        mask_sample_p = None
+        if mask_sample is not None:
+            mask_sample_p = graph.permute_tensor(mask_sample, 1, permute_idx)
+
+        # Pre-step function features current sequence and field angles
+        pre_step_func = self._decode_pre_func
+
+        # Post-step function samples sequence and/or field angles at step t
+        post_step_func = lambda t, tensors_t: self._decode_post_func(
+            t,
+            tensors_t,
+            D_p_input,
+            field_p_input,
+            temperature_D,
+            temperature_field,
+            sample,
+            resample_field,
+            mask_sample,
+            mask_sample_p,
+            top_p_D=top_p_D,
+            ban_D=ban_D,
+            bias_D_func=bias_D_func,
+        )
+
+        # Sequentially step through a forwards pass of the GNN at each
+        # position along the node dimension (1), running _pre_func
+        # and each iteration and _post_func after each iteration
+        tensors = self.gnn.sequential(
+            tensors_init,
+            pre_step_function=pre_step_func,
+            post_step_function=post_step_func,
+        )
+
+        # Unpermute sampled sequence and field angles
+        permute_idx_inverse = torch.argsort(permute_idx, dim=-1)
+        D = graph.permute_tensor(tensors["D_p"], 1, permute_idx_inverse)
+        field = graph.permute_tensor(tensors["field_p"], 1, permute_idx_inverse)
+        logp_D = graph.permute_tensor(tensors["logp_D_p"], 1, permute_idx_inverse)
+        logp_field = graph.permute_tensor(tensors["logp_field_p"], 1, permute_idx_inverse)
+
+        return D, field, logp_D, logp_field, tensors
+    
+def _filter_logits_top_p(logits, p=0.9):
+    """Filter logits by top-p (Nucleus sampling).
+
+    See Holtzman et al, ICLR 2020.
+
+    Args:
+        logits (Tensor): Logits with shape `(..., num_classes)`.
+        p (float): Cutoff probability.
+
+    Returns:
+        logits_filters (Tensor): Filtered logits
+            with shape `(..., num_classes)`.
+    """
+    logits_sort, indices_sort = torch.sort(logits, dim=-1, descending=True)
+    probs_sort = F.softmax(logits_sort, dim=-1)
+    probs_cumulative = torch.cumsum(probs_sort, dim=-1)
+
+    # Remove tokens outside nucleus (aside from top token)
+    logits_sort_filtered = logits_sort.clone()
+    logits_sort_filtered[probs_cumulative > p] = -float("Inf")
+    logits_sort_filtered[..., 0] = logits_sort[..., 0]
+
+    # Unsort
+    logits_filtered = logits_sort_filtered.gather(-1, indices_sort.argsort(-1))
+    return logits_filtered
+
 def load_model(
     weight_file: str,
     device: str = "cpu",
