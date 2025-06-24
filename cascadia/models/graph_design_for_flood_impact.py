@@ -1870,6 +1870,323 @@ def _filter_logits_top_p(logits, p=0.9):
     logits_filtered = logits_sort_filtered.gather(-1, indices_sort.argsort(-1))
     return logits_filtered
 
+class NodePredictorD(nn.Module):
+    """Predict descriptor tokens at each node given embeddings `P(D_i | h_i)`.
+
+    Args:
+        num_landcover_classes (int): Number of landcover classes.
+        dim_nodes (int): Node dimension of graph input.
+        dim_hidden (int): Hidden layer dimension.
+        loss_eps (float): Small number to avoid division by zero errors when
+            taking averages.
+        label_smoothing (float): Level of smoothing to apply.
+
+    Inputs:
+        D (torch.LongTensor): Descriptor tensor with shape
+            `(num_batch, H, W, 1)`.
+        node_h (torch.Tensor): Node features with shape
+            `(num_batch, num_residues, dim_nodes)`.
+        mask_i (torch.Tensor): Node mask with shape `(num_batch, num_residues)`.
+
+    Outputs:
+        logp_D (torch.Tensor): Log likelihoods per landclass with shape
+            `(num_batch, H, W, 1)`. During training, this applies label
+            smoothing.
+        log_probs_D (torch.Tensor): Log probabilities for each token for
+            at each residue with shape
+            `(num_batch, H*W, num_landcover_classes)`.
+    """
+
+    def __init__(
+        self,
+        num_landcover_classes: int,
+        dim_nodes: int,
+        dim_hidden: int,
+        loss_eps: float = 1e-5,
+        label_smoothing: float = 0.1,
+    ) -> None:
+        super(NodePredictorD, self).__init__()
+        self.num_landcover_classes = num_landcover_classes
+        self.dim_nodes = dim_nodes
+        self.dim_hidden = dim_hidden
+        self.loss_eps = loss_eps
+
+        self.label_smoothing = label_smoothing
+        self.training_loss = torch.nn.CrossEntropyLoss(
+            reduction="none", label_smoothing=self.label_smoothing
+        )
+
+        # Layers for predicting sequence and field angles
+        self.D_mlp = graph.MLP(
+            dim_in=dim_nodes,
+            dim_hidden=dim_hidden,
+            dim_out=self.num_landcover_classes,
+            num_layers_hidden=2,
+        )
+    # if field angles and land descriptor have a joint likelihood then maybe it
+    # should not be field angle but something like idk elevation ???
+    # I mean i guess flow angle is kind of dependent on the interaction with the land around it 
+    # but I feel like elevation is easier to find data for and more clear joint likelihood??
+    # will come back to this later
+    def forward( 
+        self, D: torch.LongTensor, node_h: torch.Tensor, mask_i: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate field angle joint likelihood given graph embeddings."""
+        log_probs_D = self.log_probs_S(node_h, mask_i)
+
+        if self.training:
+            logp_D = -self.training_loss(log_probs_D.permute([0, 2, 1]), S)
+        else:
+            logp_D = torch.gather(log_probs_D, 2, D.unsqueeze(-1)).squeeze(-1)
+
+        return logp_D, log_probs_D
+    
+    def sample(
+        self,
+        node_h: torch.Tensor,
+        mask_i: torch.Tensor,
+        temperature: float = 1.0,
+        top_p: Optional[float] = None,
+        mask_D: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.LongTensor:
+        """Sample sequence and graph embeddings.
+
+        Args:
+            node_h (torch.Tensor): Node features with shape
+                `(num_batch, HxW, dim_nodes)`.
+            mask_i (torch.Tensor): Node mask with shape
+                `(num_batch, num_residues)`.
+            temperature (float): Temperature parameter for sampling sequence
+                tokens. The default value of 1.0 corresponds to the model's
+                unadjusted positions, though because of training such as label
+                smoothing values less than 1.0 are recommended.
+            top_p (float, optional): Top-p cutoff for Nucleus Sampling, see
+                Holtzman et al ICLR 2020.
+            ban_D (tuple, optional): An optional set of token indices from
+                `cascadia.constants.NLCD` to ban during sampling.
+
+        Returns:
+            D_sample (torch.LongTensor): Sampled sequence of shape `(num_batch,
+            num_grid_squares)`.
+
+        """
+        num_batch, num_grid_squares, _ = node_h.shape
+        log_probs_D = self.log_probs_D(node_h, mask_i)
+        if bias is not None:
+            log_probs_D = log_probs_D + bias
+        if mask_D is not None:
+            log_probs_D = torch.where(
+                mask_D > 0, log_probs_D, -float("Inf") * torch.ones_like(log_probs_D)
+            )
+        if top_p is not None:
+            log_probs_D = _filter_logits_top_p(log_probs_D, p=top_p)
+        p = torch.distributions.categorical.Categorical(
+            logits=log_probs_D / temperature
+        )
+        D_sample = p.sample()
+        return D_sample
+
+class NodePredictorField(nn.Module):
+    """Predict field angles autoregressively at each node given embeddings.
+    I WILL COME BACK TO THIS BECASE I THINK THIS IS NOT RIGHT TERMINOLOGY
+    AND I HATE HOW MUCH I AM TYPING THIS OUT
+
+    Decomposes as `P(field_i_{1-4} | h_i) = P(field_i_4 | field_i_<4 h_i) ... P(field_i_1 | h_i)`.
+
+    Args:
+        num_landcover_classes (int): Number of amino acids.
+        num_field_bins (int): Number of discretization bins per field angle.
+        dim_nodes (int): Node dimension of graph input.
+        dim_hidden (int): Hidden layer dimension.
+        loss_eps (float): Small number to avoid division by zero errors when
+            taking averages.
+        label_smoothing (float): Level of smoothing to apply.
+
+    Inputs:
+        D (torch.LongTensor): Descriptor tensor with shape
+            `(num_batch, num_residues)`.
+        field (torch.Tensor): field angles with shape
+            `(num_batch, num_residues, 4)`.
+        mask_field (torch.Tensor): field angle mask with shape
+            `(num_batch, num_residues, 4)`.
+        node_h (torch.Tensor): Node features with shape
+            `(num_batch, num_residues, dim_nodes)`.
+        mask_i (torch.Tensor): Node mask with shape `(num_batch, num_residues)`.
+
+    Outputs:
+        logp_field (torch.Tensor): Log likelihoods per residue with shape
+            `(num_batch, num_residues, 4)`. During training, this applies label
+            smoothing.
+        log_probs_field (torch.Tensor):  Log probabilities for each field angle
+            token at each residue with shape
+            `(num_batch, num_residues, 4, num_field_bins)`.
+    """
+
+    def __init__(
+        self,
+        num_landcover_classes: int,
+        num_field_bins: int,
+        dim_nodes: int,
+        dim_hidden: int,
+        loss_eps: float = 1e-5,
+        label_smoothing: float = 0.1,
+    ) -> None:
+        super(NodePredictorField, self).__init__()
+        self.num_landcover_classes = num_landcover_classes
+        self.num_field_bins = num_field_bins
+        self.dim_nodes = dim_nodes
+        self.dim_hidden = dim_hidden
+        self.loss_eps = loss_eps
+        self.label_smoothing = label_smoothing
+        self.training_loss = torch.nn.CrossEntropyLoss(
+            reduction="none", label_smoothing=self.label_smoothing
+        )
+        self._init_field_bins(num_field_bins)
+
+        # Layers for embedding sequence and field angles
+        self.W_D = nn.Embedding(num_landcover_classes, dim_nodes)
+        self.field_embedding = nn.ModuleList(
+            [
+                NodeFieldRBF(dim_out=dim_nodes, num_field=i, num_field_bins=num_field_bins)
+                for i in [1, 2, 3]
+            ]
+        )
+
+        # Layers for field angles
+        self.field_mlp = nn.ModuleList(
+            [
+                graph.MLP(
+                    dim_in=dim_nodes,
+                    dim_hidden=dim_hidden,
+                    dim_out=num_field_bins,
+                    num_layers_hidden=2,
+                )
+                for t in range(4)
+            ]
+        )
+
+    def _init_field_bins(self, num_field_bins):
+        # Setup bins
+        bins = torch.tensor(
+            np.linspace(-np.pi, np.pi, num_field_bins + 1), dtype=torch.float32
+        ).reshape([1, 1, 1, -1])
+        self.register_buffer("bins_left", bins[:, :, :, 0:-1])
+        self.register_buffer("bins_right", bins[:, :, :, 1:])
+        return
+    
+    def _log_probs_t(self, t, D, field, node_h, mask_i):
+        """Compute `log P(field_t | field_<t, X, C, D)`"""
+        mask_i_expand = mask_i.unsqueeze(-1)
+
+        # Embed sequence and preceding field angles
+        node_h = node_h + self.W_D(D)
+        if t > 0:
+            field_t = field[:, :, :t]
+            if len(field_t.shape) == 2:
+                field_t = field_t.unsqueeze(-1)
+            node_h = node_h + self.field_embedding[t - 1](field_t)
+
+        field_logits = mask_i_expand * self.field_mlp[t](node_h)
+        log_probs_field_t = mask_i_expand * F.log_softmax(field_logits, -1)
+        return log_probs_field_t
+    
+    def _sample_continuous(self, logits, left, right):
+        """Reparamaterization gradients via CDF inversion"""
+        base_shape = list(logits.shape)[:-1]
+        CMF = torch.cumsum(F.softmax(logits, dim=-1), dim=-1)
+        u = torch.rand(base_shape, device=logits.device)
+        _, max_idx = torch.max((u.unsqueeze(-1) < CMF).float(), dim=-1)
+        max_idx = max_idx.unsqueeze(-1)
+
+        left = left.expand(base_shape + [-1])
+        right = right.expand(base_shape + [-1])
+
+        # Gather panel bounds
+        CMF_pad = F.pad(CMF, ((1, 0)))
+        Y_left = torch.gather(left, -1, max_idx)
+        Y_right = torch.gather(right, -1, max_idx)
+        CMF_left = torch.gather(CMF_pad, -1, max_idx)
+        CMF_right = torch.gather(CMF_pad, -1, max_idx + 1)
+
+        # Local CDF inversion
+        z = Y_left + (Y_right - Y_left) * (u.unsqueeze(-1) - CMF_left) / (
+            CMF_right - CMF_left + 1e-5
+        )
+        z = z.squeeze(-1)
+        return z
+
+    def forward(
+        self,
+        D: torch.LongTensor,
+        field: torch.Tensor,
+        mask_field: torch.Tensor,
+        node_h: torch.Tensor,
+        mask_i: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate field angle joint likelihood given graph embeddings."""
+        # Build the likelihood sequentially
+        log_probs_field_list = []
+        for t in range(4):
+            log_probs_field_t = self._log_probs_t(t, D, field, node_h, mask_i)
+            log_probs_field_list.append(log_probs_field_t)
+        log_probs_field = torch.stack(log_probs_field_list, -2)
+
+        # Loss function
+        field = field.unsqueeze(-1)
+        field_onehot = ((field >= self.bins_left) * (field < self.bins_right)).float()
+        if self.training:
+            scale = self.label_smoothing / (self.num_field_bins - 1)
+            field_onehot = (
+                field_onehot * (1 - self.label_smoothing) + (1 - field_onehot) * scale
+            )
+        logp_field = mask_field * (field_onehot * log_probs_field).sum(-1)
+        return logp_field, log_probs_field
+
+    def sample(
+        self,
+        D: torch.LongTensor,
+        mask_field: torch.Tensor,
+        node_h: torch.Tensor,
+        mask_i: torch.Tensor,
+        temperature: float = 1.0,
+    ) -> torch.Tensor:
+        """Sample field angles given sequence and graph embeddings.
+
+        Args:
+            D (torch.LongTensor): Descriptor tensor with shape
+                `(num_batch, num_residues)`.
+            mask_field (torch.Tensor): field angle mask with shape
+                `(num_batch, num_residues, 4)`.
+            node_h (torch.Tensor): Node features with shape
+                `(num_batch, num_residues, dim_nodes)`.
+            mask_i (torch.Tensor): Node mask with shape
+                `(num_batch, num_residues)`.
+            temperature (float): Temperature parameter for sampling sequence
+                tokens. The default value of 1.0 corresponds to the model's
+                unadjusted positions, though because of training such as label
+                smoothing values less than 1.0 are recommended.
+
+        Returns:
+            field_sample (torch.Tensor): field angles with shape
+                `(num_batch, num_residues, 4)`.
+
+        """
+
+        # Sample field angles sequentially
+        num_batch, num_residues, _ = node_h.shape
+        field = torch.zeros(
+            [num_batch, num_residues, 4], dtype=torch.float32, device=node_h.device
+        )
+        left = self.bins_left.reshape([1, 1, self.num_field_bins])
+        right = self.bins_right.reshape([1, 1, self.num_field_bins])
+        for t in range(4):
+            log_probs_field_t = self._log_probs_t(t, D, field, node_h, mask_i)
+            field_t = self._sample_continuous(log_probs_field_t / temperature, left, right)
+            field = field + F.pad(field_t.unsqueeze(-1), (t, 3 - t))
+        return mask_field * field
+
+
 def load_model(
     weight_file: str,
     device: str = "cpu",
