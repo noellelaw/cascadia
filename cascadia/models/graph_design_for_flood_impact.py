@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from cascadia import constants
-from cascadia.data.xcs import validate_XC
+from cascadia.data.xcd import validate_XC
 from cascadia.layers import complexity, graph
 from cascadia.layers.structure import diffusion, potts, flood_graph, floodfield
 from cascadia.layers.structure.flood_graph_alldata import (
@@ -258,7 +258,7 @@ class FloodGraphDesign(nn.Module):
                 predict_D=False, # for now, we only predict flood fields
                 predict_field=(not args.separate_packing),
                 sequence_embedding=args.sequence_embedding,
-                sidechain_embedding=args.sidechain_embedding,
+                field_embedding=args.field_embedding,
                 num_layers=args.num_layers,
                 node_mlp_layers=args.node_mlp_layers,
                 node_mlp_dim=args.node_mlp_dim,
@@ -321,7 +321,7 @@ class FloodGraphDesign(nn.Module):
                 predict_S=False,
                 predict_field=True,
                 sequence_embedding=args.sequence_embedding,
-                sidechain_embedding=args.sidechain_embedding,
+                field_embedding=args.field_embedding,
                 num_layers=args.num_layers,
                 node_mlp_layers=args.node_mlp_layers,
                 node_mlp_dim=args.node_mlp_dim,
@@ -339,7 +339,7 @@ class FloodGraphDesign(nn.Module):
             )
 
         if floodfields:
-            self.field_to_X = floodfield.SideChainBuilder()
+            self.field_to_X = floodfield.FieldBuilder()
             self.X_to_field = floodfield.FieldAngles()
             self.loss_rmsd = floodfield.LossFloodfieldRMSD()
             self.loss_clash = floodfield.LossFloodfieldClashes()
@@ -364,8 +364,8 @@ class FloodGraphDesign(nn.Module):
             _schedule = self.noise_perturb.noise_schedule
             t = self.noise_perturb.sample_t(C, t)
             X_noise_bb = self.noise_perturb(X_bb, C, t=t)
-            if self.sidechains:
-                # Rebuild sidechains on noised backbone from native field angles
+            if self.fields:
+                # Rebuild flood fields on noised backbone from native field angles
                 field, mask_field = self.X_to_field(X, C, D)
                 X_noise, mask_X = self.field_to_X(X_noise_bb, C, D, field)
             else:
@@ -663,6 +663,363 @@ class FloodGraphDesign(nn.Module):
         }
         return losses
     
+
+    @torch.no_grad()
+    @validate_XC()
+    def sample(
+        self,
+        X: torch.Tensor,
+        C: torch.LongTensor,
+        D: Optional[torch.LongTensor] = None,
+        t: Optional[Union[float, torch.Tensor]] = None,
+        t_packing: Optional[Union[float, torch.Tensor]] = None,
+        mask_sample: Optional[torch.Tensor] = None,
+        permute_idx: Optional[torch.LongTensor] = None,
+        temperature_D: float = 0.1,
+        temperature_field: float = 1e-3,
+        clamped: bool = False,
+        resample_field: bool = True,
+        return_scores: bool = False,
+        top_p_D: Optional[float] = None,
+        ban_D: Optional[tuple] = None,
+        sampling_method: Literal["potts", "autoregressive"] = "autoregressive",
+        regularization: Optional[str] = "LCP",
+        potts_sweeps: int = 500,
+        potts_proposal: Literal["dlmc", "chromatic"] = "dlmc",
+        verbose: bool = False,
+        symmetry_order: Optional[int] = None,
+    ) -> tuple:
+        """Sample sequence and side chain conformations given an input structure.
+
+        Args:
+            X (torch.Tensor): All atom coordinates with shape
+                `(num_batch, H, W, 1)`.
+            C (torch.LongTensor): SLR / meteorological maps with shape
+                `(num_batch, H, W, K)`.
+            D (torch.LongTensor): Sequence tensor with shape
+                `(num_batch, H, W, 1)`.
+            t (float or torch.Tensor, optional): Diffusion time for models trained with
+                diffusion augmentation of input structures. Setting `t=0` or
+                `t=None` will condition the model to treat the structure as
+                exact coordinates, while values of `t > 0` will condition
+                the model to treat structures as though they were drawn from
+                noise-augmented ensembles with that noise level. Default is `None`,
+                while for robust design we recommend `t=0.5`. May be a float or
+                a tensor of shape `(num_batch)`.
+            t_packing (float or torch.Tensor, optional): Potentially separate diffusion
+                time for packing.
+            mask_sample (torch.Tensor, optional): Binary tensor mask indicating
+                positions to be sampled with shape `(num_batch, num_residues)` or
+                position-specific valid amino acid choices with shape
+                `(num_batch, num_residues, num_alphabet)`. If `None` (default), all
+                positions will be sampled.
+            permute_idx (LongTensor, optional): Permutation tensor for fixing
+                the autoregressive decoding order `(num_batch, num_residues)`.
+                If `None` (default), a random decoding order will be generated.
+            temperature_D (float): Temperature parameter for sampling description
+                tokens. A value of `temperature_D=1.0` corresponds to the
+                model's unadjusted positions, though because of training such as
+                label smoothing values less than 1.0 are recommended. Default is
+                `0.1`.
+            temperature_field (float): Temperature parameter for sampling field
+                angles. Even if a high temperature sequence is sampled, this is
+                recommended to always be low. Default is `1E-3`.
+            clamped (bool): If `True`, no sampling is done and the likelihood
+                values will be calculated for the input sequence and structure.
+                Used for validating the sequential versus parallel decoding
+                modes. Default is `False`.
+            resample_field (bool): If `True`, all field angles will be resampled,
+                even for sequence positions that were not sampled (i.e. the model
+                will perform global repacking). Default is `True`.
+            return_scores (bool): If `True`, return dictionary containing
+                likelihood scores similar to those produced by `forward`.
+            top_p_D (float, optional): Option to perform top-p sampling for
+                autoregressive sequence decoding. If not `None` it will be the
+                top-p value [1].
+                [1] Holtzman et al. The Curious Case of Neural Text Degeneration. (2020)
+            ban_D (tuple, optional): An optional set of token indices from
+                `cascadia.constants.NCLD` to ban during sampling.
+            sampling_method (str): Sampling method for decoding sequence from structure.
+                If `autoregressive`, sequences will be designed by ancestral sampling with
+                the autoregessive decoder head. If `potts`, sequences will be designed
+                via MCMC with the potts decoder head.
+            regularization (str, optional): Optional sequence regularization to use
+                during decoding. Can be `LCP` for Local Composition Perplexity regularization
+                which penalizes local sequence windows from having unnaturally low
+                compositional entropies. (Implemented for both `potts` and `autoregressive`)
+            potts_sweeps (int): Number of sweeps to perform for MCMC sampling of `potts`
+                decoder. A sweep corresponds to a sufficient number of Monte Carlo steps
+                such that every position could have changed.
+            potts_proposal (str): MCMC proposal for Potts sampling. Currently implemented
+                proposals are `dlmc` for Discrete Langevin Monte Carlo [1] or `chromatic`
+                for Gibbs sampling with graph coloring.
+                [1] Sun et al. Discrete Langevin Sampler via Wasserstein Gradient Flow (2023).
+            symmetry_order (int, optional): Optional integer argument to enable
+                symmetric sequence decoding under `symmetry_order`-order symmetry.
+                The first `(num_nodes // symmetry_order)` states will be free to
+                move, and all consecutively tiled sets of states will be locked
+                to these during decoding. Internally this is accomplished by
+                summing the parameters Potts model under a symmetry constraint
+                into this reduced sized system and then back imputing at the end.
+                Currently only implemented for Potts models.
+
+        Returns:
+            X_sample (torch.Tensor): Sampled all atom coordinates with shape
+                `(num_batch, H, W, 1)`.
+            D_sample (torch.LongTensor): Sampled description tensor with shape
+                `(num_batch, H, W)`.
+            permute_idx (torch.LongTensor): Permutation tensor that was used
+                for the autoregressive decoding order with shape
+                `(num_batch, H, W)`.
+            scores (dict, optional): Dictionary containing likelihood scores
+                similar to those produced by `forward`.
+        """
+        if X.shape[2] == 4:
+            X = F.pad(X, [0, 0, 0, 10])
+        landcover_classes = constants.NLCD
+        node_h, edge_h, edge_idx, mask_i, mask_ij = self.encode(X, C, t=t)
+
+        # Process sampling mask
+        logits_init = torch.zeros(
+            list(C.shape) + [len(landcover_classes)], device=C.device
+        ).float()
+        if ban_D is not None:
+            ban_D = [landcover_classes.index(c) for c in ban_D]
+        mask_sample, mask_sample_1D, D_init = potts.init_sampling_masks(
+            logits_init, mask_sample, D=D, ban_D=ban_D
+        )
+        if not clamped:
+            D = D_init
+
+        # Sample random permutations and build autoregressive mask
+        if permute_idx is None:
+            permute_idx = self.traversal(X, C, priority=mask_sample_1D)
+
+        if symmetry_order is not None and not (sampling_method == "potts"):
+            raise NotImplementedError(
+                "Symmetric decoding is currently only supported for Potts models"
+            )
+
+        if sampling_method == "potts":
+            if not self.kwargs["predict_D_potts"]:
+                raise Exception(
+                    "This FloodGraphDesign model was not trained with Potts prediction"
+                )
+
+            # Complexity regularization
+            penalty_func = None
+            mask_ij_coloring = None
+            edge_idx_coloring = None
+            if regularization == "LCP":
+                C_complexity = (
+                    C
+                    if symmetry_order is None
+                    else C[:, : C.shape[1] // symmetry_order]
+                )
+                penalty_func = lambda _D: complexity.complexity_lcp(_D, C_complexity)
+                # edge_idx_coloring, mask_ij_coloring = complexity.graph_lcp(C, edge_idx, mask_ij)
+
+            D_sample, _ = self.decoder_S_potts.sample(
+                node_h,
+                edge_h,
+                edge_idx,
+                mask_i,
+                mask_ij,
+                D=D,
+                mask_sample=mask_sample,
+                temperature=temperature_D,
+                num_sweeps=potts_sweeps,
+                penalty_func=penalty_func,
+                proposal=potts_proposal,
+                rejection_step=(potts_proposal == "chromatic"),
+                verbose=verbose,
+                edge_idx_coloring=edge_idx_coloring,
+                mask_ij_coloring=mask_ij_coloring,
+                symmetry_order=symmetry_order,
+            )
+            field_sample, logp_D, logp_field = None, None, None
+        else:
+            # Sample sequence (and field angles if one-stage)
+
+            # Complexity regularization
+            bias_S_func = None
+            if regularization == "LCP":
+                bias_S_func = complexity.complexity_scores_lcp_t
+
+            D_sample, field_sample, logp_D, logp_field, _ = self.decoder.decode(
+                X,
+                C,
+                D,
+                node_h,
+                edge_h,
+                edge_idx,
+                mask_i,
+                mask_ij,
+                permute_idx,
+                temperature_D=temperature_D,
+                temperature_field=temperature_field,
+                sample=not clamped,
+                mask_sample=mask_sample,
+                resample_field=resample_field,
+                top_p_D=top_p_D,
+                ban_D=ban_D,
+                bias_S_func=bias_S_func,
+            )
+
+        if self.separate_packing:
+            if t != t_packing:
+                node_h, edge_h, edge_idx, mask_i, mask_ij = self.encode(
+                    X, C, t=t_packing
+                )
+
+            # In two-stage packing, re-process embeddings with sequence
+            node_h = node_h + mask_i.unsqueeze(-1) * self.embed_D(D_sample)
+            node_h, edge_h = self.encoder_D_gnn(
+                node_h, edge_h, edge_idx, mask_i, mask_ij
+            )
+            _, field_sample, _, logp_field, _ = self.decoder_field.decode(
+                X,
+                C,
+                D_sample,
+                node_h,
+                edge_h,
+                edge_idx,
+                mask_i,
+                mask_ij,
+                permute_idx,
+                temperature_field=temperature_field,
+                sample=not clamped,
+                mask_sample=mask_sample_1D,
+                resample_field=resample_field,
+            )
+
+        # Rebuild side chains
+        X_sample, mask_X = self.field_to_X(X[:, :, :4, :], C, D_sample, field_sample)
+
+        if return_scores:
+            if sampling_method == "potts":
+                raise NotImplementedError
+
+            # Summarize
+            mask_field = floodfield.field_mask(C, D_sample)
+            neglogp_D = -(mask_i * logp_D).sum([1]) / (
+                (mask_i).sum([1]) + self.loss_eps
+            )
+            neglogp_field = -(mask_field * logp_field).sum([1, 2]) / (
+                mask_field.sum([1, 2]) + self.loss_eps
+            )
+
+            scores = {
+                "neglogp_D": neglogp_D,
+                "neglogp_field": neglogp_field,
+                "logp_D": logp_D,
+                "logp_field": logp_field,
+                "mask_i": mask_i,
+                "mask_field": mask_field,
+            }
+            return X_sample, D_sample, permute_idx, scores
+        else:
+            return X_sample, D_sample, permute_idx
+
+    @validate_XC()
+    def pack(
+        self,
+        X: torch.Tensor,
+        C: torch.LongTensor,
+        D: torch.LongTensor,
+        permute_idx: Optional[torch.LongTensor] = None,
+        temperature_field: float = 1e-3,
+        clamped: bool = False,
+        resample_field: bool = True,
+        return_scores: bool = False,
+    ) -> tuple:
+        """Sample side chain conformations given an input structure.
+
+        Args:
+            X (torch.Tensor): All flood depth coordinates with shape
+                `(num_batch, H, W, 1)`.
+            C (torch.LongTensor): Field map with shape
+                `(num_batch, H, W, K)`.
+            D (torch.LongTensor): Descriptor tensor with shape
+                `(num_batch, num_residues)`.
+            permute_idx (LongTensor, optional): Permutation tensor for fixing
+                the autoregressive decoding order `(num_batch, num_residues)`.
+                If `None` (default), a random decoding order will be generated.
+            temperature_field (float): Temperature parameter for sampling field
+                angles. Even if a high temperature sequence is sampled, this is
+                recommended to always be low. Default is `1E-3`.
+            clamped (bool): If `True`, no sampling is done and the likelihood
+                values will be calculated for the input sequence and structure.
+                Used for validating the sequential versus parallel decoding
+                modes. Default is `False`
+            resample_field (bool): If `True`, all field angles will be resampled,
+                even for sequence positions that were not sampled (i.e. global
+                repacking). Default is `True`.
+            return_scores (bool): If `True`, return dictionary containing
+                likelihood scores similar to those produced by `forward`.
+
+        Returns:
+            X_sample (torch.Tensor): Sampled all atom coordinates with shape
+                `(num_batch, num_residues, 14, 3)`.
+            neglogp_field (torch.Tensor, optional): Average negative log
+                probability per field angle.
+            permute_idx (torch.LongTensor): Permutation tensor that was used
+                for the autoregressive decoding order with shape
+                `(num_batch, num_residues)`.
+            scores (dict, optional): Dictionary containing likelihood scores
+                similar to those produced by `forward`.
+        """
+        assert self.separate_packing
+
+        with torch.no_grad():
+            if X.shape[2] == 4:
+                X = F.pad(X, [0, 0, 0, 10])
+
+            node_h, edge_h, edge_idx, mask_i, mask_ij = self.encode(X, C)
+
+            # Sample random permutations and build autoregressive mask
+            if permute_idx is None:
+                permute_idx = self.traversal(X, C)
+
+            # In two-stage packing, re-process embeddings with sequence
+            node_h = node_h + mask_i.unsqueeze(-1) * self.embed_D(D)
+            node_h, edge_h = self.encoder_D_gnn(
+                node_h, edge_h, edge_idx, mask_i, mask_ij
+            )
+            _, field_sample, _, logp_field, _ = self.decoder_field.decode(
+                X,
+                C,
+                D,
+                node_h,
+                edge_h,
+                edge_idx,
+                mask_i,
+                mask_ij,
+                permute_idx,
+                temperature_field=temperature_field,
+                sample=not clamped,
+                resample_field=resample_field,
+            )
+
+            X_sample, mask_X = self.field_to_X(X[:, :, :4, :], C, D, field_sample)
+
+            # Summarize
+            mask_field = floodfield.field_mask(C, D)
+            neglogp_field = -(mask_field * logp_field).sum([1, 2]) / (
+                mask_field.sum([1, 2]) + self.loss_eps
+            )
+        if return_scores:
+            scores = {
+                "neglogp_field": neglogp_field,
+                "logp_field": logp_field,
+                "mask_i": mask_i,
+                "mask_field": mask_field,
+            }
+            return X_sample, permute_idx, scores
+        else:
+            return X_sample, permute_idx
+
+        return X_sample, neglogp_field, permute_idx # unsure why this boi here (linter?)
 
 class BackboneEncoderGNN(nn.Module):
     """Graph Neural Network for processing protein structure into graph embeddings.
