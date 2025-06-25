@@ -624,6 +624,44 @@ class FloodNodeInternalCoords(nn.Module):
 
         return node_h
 
+class NodeRadii(nn.Module):
+    """
+    Node features representing spatial variability.
+
+    Args:
+        length_scale (float): Normalizing factor for distances (e.g., in meters).
+    
+    Inputs:
+        X (Tensor): Coordinates of each node (e.g., lat/lon/elevation), shape (B, N, D).
+        mask (Tensor): Optional mask (B, N, 1) to ignore padded or invalid nodes.
+    
+    Outputs:
+        node_h (Tensor): (B, N, D) spread or "radius" of flood-relevant position features.
+    """
+
+    def __init__(self, length_scale: float = 100.0):
+        super(NodeRadii, self).__init__()
+        self.length_scale = length_scale
+        self.dim_out = 3  # if X has 3D coords (e.g., lat/lon/elev or x/y/depth)
+
+    def forward(
+        self,
+        X: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # X: (B, N, D)
+        B, N, D = X.shape
+
+        if mask is None:
+            mask = torch.ones((B, N, 1), device=X.device)
+
+        # Compute batch-wise weighted centroid
+        X_center = (mask * X).sum(dim=1, keepdim=True) / (mask.sum(dim=1, keepdim=True) + 1e-6)
+
+        # Normalize and square distance from centroid
+        radii = (mask * ((X - X_center) / self.length_scale) ** 2)
+
+        return radii  # (B, N, D)
 
 class Edge6grids(nn.Module):
     """Build concatenation of 3mer coordinates on graph edges.

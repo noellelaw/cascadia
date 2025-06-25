@@ -692,7 +692,7 @@ class FloodGraphDesign(nn.Module):
         """Sample sequence and side chain conformations given an input structure.
 
         Args:
-            X (torch.Tensor): All atom coordinates with shape
+            X (torch.Tensor): All grid_square coordinates with shape
                 `(num_batch, H, W, 1)`.
             C (torch.LongTensor): SLR / meteorological maps with shape
                 `(num_batch, H, W, K)`.
@@ -764,7 +764,7 @@ class FloodGraphDesign(nn.Module):
                 Currently only implemented for Potts models.
 
         Returns:
-            X_sample (torch.Tensor): Sampled all atom coordinates with shape
+            X_sample (torch.Tensor): Sampled all grid_square coordinates with shape
                 `(num_batch, H, W, 1)`.
             D_sample (torch.LongTensor): Sampled description tensor with shape
                 `(num_batch, H, W)`.
@@ -959,7 +959,7 @@ class FloodGraphDesign(nn.Module):
                 likelihood scores similar to those produced by `forward`.
 
         Returns:
-            X_sample (torch.Tensor): Sampled all atom coordinates with shape
+            X_sample (torch.Tensor): Sampled all grid_square coordinates with shape
                 `(num_batch, num_residues, 14, 3)`.
             neglogp_field (torch.Tensor, optional): Average negative log
                 probability per field angle.
@@ -1068,7 +1068,7 @@ class BackboneEncoderGNN(nn.Module):
 
     Inputs:
         X (torch.Tensor): Backbone coordinates with shape
-                `(num_batch, num_residues, num_atoms, 3)`.
+                `(num_batch, num_residues, num_grid_squares, 3)`.
         C (torch.LongTensor): Chain map with shape `(num_batch, num_residues)`.
         node_h_aux (torch.LongTensor, optional): Auxiliary node features with
             shape `(num_batch, num_residues, dim_nodes)`.
@@ -1111,7 +1111,7 @@ class BackboneEncoderGNN(nn.Module):
         skip_connect_input: bool = False,
         mlp_activation: str = "softplus",
         dropout: float = 0.1,
-        graph_distance_atom_type: int = -1,
+        graph_distance_grid_square_type: int = -1,
         graph_cutoff: Optional[float] = None,
         graph_mask_interfaces: bool = False,
         graph_criterion: str = "knn",
@@ -1136,7 +1136,7 @@ class BackboneEncoderGNN(nn.Module):
         self.checkpoint_gradients = checkpoint_gradients
 
         graph_kwargs = {
-            "distance_atom_type": args.graph_distance_atom_type,
+            "distance_grid_square_type": args.graph_distance_grid_square_type,
             "cutoff": args.graph_cutoff,
             "mask_interfaces": args.graph_mask_interfaces,
             "criterion": args.graph_criterion,
@@ -1723,7 +1723,7 @@ class FloodfieldDecoderGNN(nn.Module):
 
         Args:
             X (torch.Tensor): Backbone coordinates with shape
-                `(num_batch, num_residues, num_atoms, 3)`.
+                `(num_batch, num_residues, num_grid_squares, 3)`.
             C (torch.LongTensor): Field map with shape
                 `(num_batch, num_residues)`.
             D (torch.LongTensor): Descriptor tensor with shape
