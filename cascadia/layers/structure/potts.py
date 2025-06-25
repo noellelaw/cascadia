@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from chroma.layers import graph
+from cascadia.layers import graph
 
 
 class GraphPotts(nn.Module):

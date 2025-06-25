@@ -1169,7 +1169,7 @@ class BackboneEncoderGNN(nn.Module):
             checkpoint_gradients=checkpoint_gradients,
         )
 
-    @validate_XC(all_atom=False)
+    @validate_XC(high_res=False)
     def forward(
         self,
         X: torch.Tensor,
