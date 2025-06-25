@@ -57,11 +57,11 @@ class GraphBackbone(nn.Module):
         dim_nodes: int = 128,
         dim_edges: int = 128,
         num_neighbors: int = 30,
-        node_features: Tuple = (("internal_coords", {"log_lengths": True}),),
+        node_features: Tuple = (("internal_coords", {"log_depth": True}),),
         edge_features: Tuple = (
-            "distances_2mer",
-            "orientations_2mer",
-            "distances_chain",
+            "distances_2grid",
+            "orientations_2grid",
+            "distances_field",
         ),
         num_layers: int = 3,
         dropout: float = 0.1,
@@ -159,7 +159,7 @@ class GraphBackbone(nn.Module):
                 d_input=1, d_model=dim_nodes, trainable=False, scale=16.0
             )
 
-        self.noise_perturb = diffusion.DiffusionChainCov(
+        self.noise_perturb = diffusion.DiffusionFieldCov(
             noise_schedule=args.noise_schedule,
             beta_min=args.noise_beta_min,
             beta_max=args.noise_beta_max,

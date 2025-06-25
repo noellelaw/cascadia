@@ -150,9 +150,9 @@ class FloodFeatureGraph(nn.Module):
         edge_dict = {
             "distances_6grid": EdgeDistance6grid,
             "distances_2grid": EdgeDistance2grid,
-            "orientations_2grid": EdgeOrientation2grid,
+            "orientations_2grid": EdgeOrientationField,
             "position_2grid": EdgePositionalEncodings,
-            "distances_field": EdgeDistancefield,
+            "distances_field": EdgeDistanceField,
             "orientations_field": EdgeOrientationField,
             "cartesian_coords": EdgeCartesianCoords,
             "random_fourier_2grid": EdgeRandomFourierFeatures2grid,
@@ -748,7 +748,7 @@ class Edge6grids(nn.Module):
         else:
             return X_ij
          
-class Edge2grid(nn.Module):
+class Edge2grids(nn.Module):
     """Build concatenation of 1mer coordinates on graph edges.
 
     Inputs:
@@ -767,7 +767,7 @@ class Edge2grid(nn.Module):
     """
 
     def __init__(self):
-        super(Edge2grid, self).__init__()
+        super(Edge2grids, self).__init__()
 
     def forward(
         self,
@@ -874,6 +874,98 @@ class EdgeDistance6grid(nn.Module):
 
     def raw_func(self, D):
         return D
+    
+class EdgeDistance2grid(nn.Module):
+    """Edge features based on field distance matrices along each i,j 2grid.
+
+    Args:
+        feature (str, optional): Option string in {'log', 'inverse', 'raw'}
+            specifying how to process the raw distance features.
+            Defaults to 'log'.
+        distance_eps (float, optional): Smoothing parameter to prevent feature
+            explosion at small distances. Can be thought of as a 'minimum length
+            scale'. Defaults to 0.01.
+
+    Attributes:
+        dim_out (int): Number of dimensions of the output features.
+
+    Inputs:
+        X (torch.Tensor): Backbone coordinates with shape
+            `(num_batch, num_residues, num_atom_types, 3)`.
+        edge_idx (torch.LongTensor): Graph indices for expansion with shape
+            `(num_batch, num_residues, num_neighbors)`.
+        C (torch.LongTensor): field map with shape
+            `(num_batch, num_residues)`.
+
+    Outputs:
+        edge_h (torch.Tensor): Edge distance matrix features with shape
+            `(num_batch, num_residues, num_neighbors, (6 * num_atom_types)**2)`
+    """
+
+    def __init__(
+        self,
+        features: str = "rbf+log",
+        distance_eps: float = 0.01,
+        num_atom_types: int = 4,
+        rbf_min: float = 0.0,
+        rbf_max: float = 20.0,
+        rbf_count: int = 20,
+    ):
+        super(EdgeDistance2grid, self).__init__()
+        self.distance_eps = distance_eps
+        self.num_atom_types = num_atom_types
+        self.layer_2grids = Edge2grids()
+        self.layer_distance = geometry.GridDistances()
+
+        features = features.split("+")
+        if not isinstance(features, list):
+            features = [features]
+        self.features = features
+        if "rbf" in self.features:
+            self.rbf_function = RBFExpansion(rbf_min, rbf_max, rbf_count)
+        dim_base = (2 * num_atom_types) ** 2
+        feature_dims = {
+            "log": dim_base,
+            "inverse": dim_base,
+            "raw": dim_base,
+            "rbf": dim_base * rbf_count,
+        }
+
+        # Public attribute
+        self.dim_out = sum([feature_dims[d] for d in features])
+
+        self.feature_funcs = {
+            "log": lambda D: torch.log(D + self.distance_eps),
+            "inverse": lambda D: 1.0 / (D + self.distance_eps),
+            "raw": lambda D: D,
+            "rbf": lambda D: self.rbf_function(D),
+        }
+
+    def featurize(self, D):
+        h_list = []
+        for feature in self.features:
+            h = self.feature_funcs[feature](D)
+            h_list.append(h)
+        h = torch.cat(h_list, -1)
+        return h
+
+    def forward(
+        self,
+        X: torch.Tensor,
+        edge_idx: torch.LongTensor,
+        C: Optional[torch.LongTensor] = None,
+    ) -> torch.Tensor:
+        X_ij, mask_ij = self.layer_2grids(X, edge_idx, C=C)
+        D_ij = self.layer_distance(X_ij, dim=-2)
+        shape_flat = list(D_ij.shape[:3]) + [-1]
+        D_ij = D_ij.reshape(shape_flat)
+        feature_ij = self.featurize(D_ij)
+
+        # DEBGUG
+        # _debug_plot_edges(edge_idx, feature_ij, unravel=True)
+        # exit(0)
+        edge_h = mask_ij * feature_ij
+        return edge_h
 
 
 class EdgeOrientationField(nn.Module):

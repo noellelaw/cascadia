@@ -103,12 +103,12 @@ class FloodGraphDesign(nn.Module):
             symmetric.
         noise_schedule (str, optional): Noise schedule for mapping between
             diffusion time and noise level, see
-            chroma.layers.structure.diffusion.DiffusionChainCov for allowed
+            chroma.layers.structure.diffusion.DiffusionfieldCov for allowed
             values. If not set, model should only be provided with denoised
             backbones.
         noise_covariance_model (str): Covariance mode for mapping between
             diffusion time and noise level, see
-            chroma.layers.structure.diffusion.DiffusionChainCov for allowed
+            chroma.layers.structure.diffusion.DiffusionfieldCov for allowed
             values.
         noise_complex_scaling (bool): Whether to scale noise for complexes.
         noise_beta_range (Tuple[float, float]): Minimum and maximum noise levels
@@ -147,11 +147,11 @@ class FloodGraphDesign(nn.Module):
         dim_nodes: int = 128,
         dim_edges: int = 128,
         num_neighbors: int = 30,
-        node_features: tuple = (("internal_coords", {"log_lengths": True}),),
+        node_features: tuple = (("internal_coords", {"log_depth": True}),),
         edge_features: tuple = (
-            "distances_2mer",
-            "orientations_2mer",
-            "distances_chain",
+            "distances_2grid",
+            "orientations_2grid",
+            "distances_field",
         ),
         sequence_embedding: str = "linear",
         floodfield_embedding: str = "field_rbf",
@@ -236,7 +236,7 @@ class FloodGraphDesign(nn.Module):
 
         # Time features for diffusion
         if args.noise_schedule is not None:
-            self.noise_perturb = diffusion.DiffusionChainCov(
+            self.noise_perturb = diffusion.DiffusionFieldCov(
                 noise_schedule=args.noise_schedule,
                 beta_min=args.noise_beta_range[0],
                 beta_max=args.noise_beta_range[1],
@@ -462,7 +462,7 @@ class FloodGraphDesign(nn.Module):
         Args:
             X (torch.Tensor): Backbone coordinates with shape
                 `(num_batch, H, W, 3)`.
-            C (torch.LongTensor): Chain map with shape
+            C (torch.LongTensor): field map with shape
                 `(num_batch, num_residues)`.
             t (torch.Tensor, optional): Diffusion timesteps corresponding to
                 noisy input backbones, of shape `(num_batch)`. Default is no
@@ -569,7 +569,7 @@ class FloodGraphDesign(nn.Module):
         Args:
             X (torch.Tensor): Backbone coordinates with shape
                 `(num_batch, H, W, 1)`.
-            C (torch.LongTensor): Chain map with shape
+            C (torch.LongTensor): field map with shape
                 `(num_batch, H, W, 1)`.
             D (torch.LongTensor): Description tensor with shape
                 `(num_batch, H)`.
@@ -632,7 +632,7 @@ class FloodGraphDesign(nn.Module):
         else:
             neglogp_D_potts = None
 
-        # Evaluate sampled side chains
+        # Evaluate sampled side fields
         decoder = self.decoder_field if self.separate_packing else self.decoder
         field_sample = decoder.decoder_field.sample(
             D, o["mask_field"], o["node_h_field"], o["mask_i"], temperature=0.01
@@ -689,7 +689,7 @@ class FloodGraphDesign(nn.Module):
         verbose: bool = False,
         symmetry_order: Optional[int] = None,
     ) -> tuple:
-        """Sample sequence and side chain conformations given an input structure.
+        """Sample sequence and side field conformations given an input structure.
 
         Args:
             X (torch.Tensor): All grid_square coordinates with shape
@@ -893,7 +893,7 @@ class FloodGraphDesign(nn.Module):
                 resample_field=resample_field,
             )
 
-        # Rebuild side chains
+        # Rebuild side fields
         X_sample, mask_X = self.field_to_X(X[:, :, :4, :], C, D_sample, field_sample)
 
         if return_scores:
@@ -933,7 +933,7 @@ class FloodGraphDesign(nn.Module):
         resample_field: bool = True,
         return_scores: bool = False,
     ) -> tuple:
-        """Sample side chain conformations given an input structure.
+        """Sample side field conformations given an input structure.
 
         Args:
             X (torch.Tensor): All flood depth coordinates with shape
@@ -1057,7 +1057,7 @@ class BackboneEncoderGNN(nn.Module):
         graph_cutoff (float, optional): Cutoff distance for graph construction:
             mask any edges further than this cutoff. Default is `None`.
         graph_mask_interfaces (bool): Restrict connections only to within
-            chains, excluding-between chain interactions. Default is `False`.
+            fields, excluding-between field interactions. Default is `False`.
         graph_criterion (str): Method used for building graph from distances.
             Currently supported methods are `{knn, random_log, random_linear}`.
             Default is `knn`.
@@ -1069,7 +1069,7 @@ class BackboneEncoderGNN(nn.Module):
     Inputs:
         X (torch.Tensor): Backbone coordinates with shape
                 `(num_batch, num_residues, num_grid_squares, 3)`.
-        C (torch.LongTensor): Chain map with shape `(num_batch, num_residues)`.
+        C (torch.LongTensor): field map with shape `(num_batch, num_residues)`.
         node_h_aux (torch.LongTensor, optional): Auxiliary node features with
             shape `(num_batch, num_residues, dim_nodes)`.
         edge_h_aux (torch.LongTensor, optional): Auxiliary edge features with
@@ -1096,11 +1096,11 @@ class BackboneEncoderGNN(nn.Module):
         dim_nodes: int = 128,
         dim_edges: int = 128,
         num_neighbors: int = 30,
-        node_features: tuple = (("internal_coords", {"log_lengths": True}),),
+        node_features: tuple = (("internal_coords", {"log_depth": True}),),
         edge_features: tuple = (
-            "distances_2mer",
-            "orientations_2mer",
-            "distances_chain",
+            "distances_2grid",
+            "orientations_2grid",
+            "distances_field",
         ),
         num_layers: int = 3,
         node_mlp_layers: int = 1,
@@ -1495,7 +1495,7 @@ class FloodfieldDecoderGNN(nn.Module):
             node_h, edge_h, edge_idx, mask_i, mask_ij, permute_idx
         )
 
-        # Permute sequence and side chain field angles
+        # Permute sequence and side field field angles
         X_p = graph.permute_tensor(X, 1, permute_idx)
         C_p = graph.permute_tensor(C, 1, permute_idx)
         D_p = graph.permute_tensor(D, 1, permute_idx) # Hmmm
@@ -1513,7 +1513,7 @@ class FloodfieldDecoderGNN(nn.Module):
             node_h_p, edge_h_p, edge_idx_p, mask_i_p, mask_ij_p, permute_idx_inverse
         )
 
-        # Predict per-position joint probabilities of each side-chain's sequence and structure
+        # Predict per-position joint probabilities of each side-field's sequence and structure
         logp_D, log_probs_D, logp_field, log_probs_field = None, None, None, None
         if self.predict_D:
             (logp_D, log_probs_d,) = self.decoder_D(D, node_h, mask_i)
@@ -1544,7 +1544,7 @@ class FloodfieldDecoderGNN(nn.Module):
         h_D_p_ij = graph.collect_neighbors(h_D_p, edge_idx_p)
         edge_h_p = edge_h_p + mask_ij_p.unsqueeze(-1) * h_D_p_ij
 
-        # Add side chain context
+        # Add side field context
         if self.predict_field:
             if self.floodfield_embedding in ["field_rbf", "mixed_field_X"]:
                 h_field_p = self.embed_field(field_p)
@@ -1657,7 +1657,7 @@ class FloodfieldDecoderGNN(nn.Module):
 
         _scatter_t(tensors_t["D_p"], D_p_t)
 
-        # Sample updated side chain conformations
+        # Sample updated side field conformations
         mask_field_p_t = floodfield.field_mask(C_p_t, D_p_t)
         field_p_t = field_p_input[:, t].unsqueeze(1).clone()
         if self.predict_field and sample:
@@ -1672,7 +1672,7 @@ class FloodfieldDecoderGNN(nn.Module):
             else:
                 field_p_t = field_p_t_sample
 
-            # Rebuild side chain
+            # Rebuild side field
             X_p_t_bb = tensors_t["X_p"][:, t, :4, :].unsqueeze(1)
             X_p_t, _ = self.field_to_X(X_p_t_bb, C_p_t, D_p_t, field_p_t)
             _scatter_t(tensors_t["X_p"], X_p_t)
