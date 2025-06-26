@@ -277,7 +277,7 @@ class FloodFeatureGraph(nn.Module):
         return
 
     def _reference_stats(self, reference_pdb):
-        X, C, _ = Flood.from_PDBID(reference_pdb).to_XCS()
+        X, C, _ = Flood.from_PDBID(reference_pdb).to_XCD()
         stats_dict = self._feature_stats(X, C)
         return stats_dict
     

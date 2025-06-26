@@ -1,12 +1,16 @@
+ace_tools
+geopandas
 matplotlib
 nglview==3.0.8
 numpy
 pandas
 Pillow
 pytest
+rasterio
 Requests
 scikit-learn
 scipy
+shapely
 torch
 torch_geometric
 tqdm

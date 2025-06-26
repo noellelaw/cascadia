@@ -1,5 +1,10 @@
 import torch
 
+# Maybe right now I need to simplify (</3) and assume I am reading in a CSV that maps to a:
+# 1. path to a raster file with flood depth data
+# 2. path to a raster file with land use mask data
+# 3. A column for SLR data (relative to the 1900 baseline, meters please)
+# 4. A column for meteorlogical data (e.g., surge data)
 class Flood:
     """Flood scenario representation based on DDPM-sampled grid data and optional infrastructure context."""
 
