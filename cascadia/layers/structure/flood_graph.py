@@ -276,8 +276,8 @@ class FloodFeatureGraph(nn.Module):
             self.register_buffer(f"edge_means_{i}", tensor)
         return
 
-    def _reference_stats(self, reference_pdb):
-        X, C, _ = Flood.from_PDBID(reference_pdb).to_XCD()
+    def _reference_stats(self, reference_csv):
+        X, C, _ = Flood.Flood.from_csv("validation.csv", grid_size_m=100).to_XCD()
         stats_dict = self._feature_stats(X, C)
         return stats_dict
     
