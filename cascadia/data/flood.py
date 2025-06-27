@@ -6,7 +6,7 @@
 # 4. A column for meteorlogical data (e.g., surge data)
 import torch
 import pandas as pd
-from typing import Optional
+from typing import Optional, Tuple
 from cascadia.data.utils.raster_to_grid import process_csv  # <- your raster grid processing function
 
 class Flood:
@@ -46,9 +46,31 @@ class Flood:
     def from_XCD(X: torch.Tensor, C: torch.Tensor, D: Optional[torch.Tensor]) -> "Flood":
         return Flood(depth=X, land_mask=C, meta=D)
 
-    def to_XCD(self):
-        return self.depth, self.land_mask, self.meta
+    
+    def to_XCD(self) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Convert Flood object into X (flood input), C (conditioning: SLR, surge), and D_meta (e.g., land cover).
 
+        Returns:
+            X (torch.Tensor): Flood input features — e.g., depth, shape (B, H, W, 1)
+            C (torch.Tensor): Conditioning features — e.g., SLR, surge, shape (B, H, W, K)
+            D_meta (torch.Tensor): Metadata — e.g., land cover class, shape (B, H, W, M)
+        """
+        # X: the flood depth field
+        X = self.depth.unsqueeze(-1)  # shape (B, H, W, 1)
+
+        # C: conditioning features — surge, SLR, etc.
+        if self.meta is not None:
+            C = self.meta  # shape (B, H, W, K)
+        else:
+            raise ValueError("Expected 'meta' to contain SLR and meteorological data for conditioning.")
+
+        # D_meta: semantic/static metadata — e.g., land cover
+        D_meta = self.land_mask.unsqueeze(-1).float()  # shape (B, H, W, 1)
+
+        return X, C, D_meta
+
+    
     def canonicalize(self):
         self.depth = torch.clamp(self.depth, min=0.0)
         return self
@@ -57,34 +79,42 @@ class Flood:
     def from_csv(csv_path: str, grid_size_m: int = 100) -> "Flood":
         """
         Load flood scenario tensors from a CSV describing (depth + landcover) rasters
-        + SLR mean value since 1900.
-        
+        and SLR/meteorological conditioning metadata.
+
+        Returns:
+            Flood instance with batched tensors of shape:
+                depth:     (B, H, W)
+                land_mask: (B, H, W)
+                meta:      (B, H, W, K)
         """
         df = process_csv(csv_path, grid_size_m=grid_size_m)
 
-        # Pivot into (B, H, W) shaped tensors (assume batch=1 for now)
-        # You may later want to group by input filenames
+        # Group by source files (or scenario ID) to build each batch slice
+        group_key = "source_depth_tif"  # or a "scenario_id" column if available
+        grouped = df.groupby(group_key)
+        batch_size = len(grouped)
 
+        # Extract universal x/y coordinates from the first group (assumes aligned grids)
         x_coords = sorted(df["x"].unique())
-        y_coords = sorted(df["y"].unique(), reverse=True)  # top-to-bottom
-
+        y_coords = sorted(df["y"].unique(), reverse=True)
         H, W = len(y_coords), len(x_coords)
         x_map = {x: i for i, x in enumerate(x_coords)}
         y_map = {y: i for i, y in enumerate(y_coords)}
 
-        depth_tensor = torch.zeros((1, H, W), dtype=torch.float32)
-        land_tensor = torch.zeros((1, H, W), dtype=torch.long)
-        has_meta = "mean_surge" in df.columns
-        meta_tensor = torch.zeros((1, H, W, 1), dtype=torch.float32) if has_meta else None
+        # Allocate batched tensors
+        depth_tensor = torch.zeros((batch_size, H, W), dtype=torch.float32)
+        land_tensor = torch.zeros((batch_size, H, W), dtype=torch.long)
+        has_meta = "slr_added" in df.columns
+        meta_tensor = torch.zeros((batch_size, H, W, 1), dtype=torch.float32) if has_meta else None
 
-        for _, row in df.iterrows():
-            i = y_map[row["y"]]
-            j = x_map[row["x"]]
-            depth_tensor[0, i, j] = row["mean_depth"]
-            land_tensor[0, i, j] = row["land_cover"]
-            if has_meta:
-                meta_tensor[0, i, j, 0] = row["mean_surge"]
-
+        for b, (_, group_df) in enumerate(grouped):
+            for _, row in group_df.iterrows():
+                i = y_map[row["y"]]
+                j = x_map[row["x"]]
+                depth_tensor[b, i, j] = row["mean_depth"]
+                land_tensor[b, i, j] = row["land_cover"]
+                if has_meta:
+                    meta_tensor[b, i, j, 0] = row["slr_added"]
         return Flood(depth=depth_tensor, land_mask=land_tensor, meta=meta_tensor)
 
 

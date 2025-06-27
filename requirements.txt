@@ -1,10 +1,15 @@
 ace_tools
+cftime
 geopandas
+h5netcdf
+iris
 matplotlib
+netCDF4
 nglview==3.0.8
 numpy
 pandas
 Pillow
+pydap
 pytest
 rasterio
 Requests
@@ -15,3 +20,4 @@ torch
 torch_geometric
 tqdm
 transformers==4.52.4
+zarr

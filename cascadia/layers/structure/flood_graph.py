@@ -118,7 +118,7 @@ class FloodFeatureGraph(nn.Module):
         node_features: tuple = ("internal_coords",),
         edge_features: tuple = ("distances_6grid", "distances_field"),
         centered: bool = True,
-        centered_pdb: str = "2g3n",
+        centered_pdb: str = "./datasets/validation.csv",
     ):
         super(FloodFeatureGraph, self).__init__()
 
@@ -229,22 +229,23 @@ class FloodFeatureGraph(nn.Module):
 
         return node_h, edge_h, edge_idx, mask_i, mask_ij
 
-    def _load_centering_params(self, reference_pdb: str):
+    def _load_centering_params(self, reference_csv: str = "./datasets/validation.csv"):
         basepath = os.path.join(tempfile.gettempdir(), "generate", "params")
         if not os.path.exists(basepath):
             os.makedirs(basepath)
 
-        filename = f"centering_{reference_pdb}.params"
+        # Key will now be based on flood data file + features
+        filename = f"centering_{os.path.basename(reference_csv)}.params"
         self.centering_file = os.path.join(basepath, filename)
         key = (
-            reference_pdb
+            os.path.basename(reference_csv)
             + ";"
             + json.dumps(self.node_features)
             + ";"
             + json.dumps(self.edge_features)
         )
 
-        # Attempt to load saved centering params, otherwise compute and cache
+        # Attempt to load cached centering parameters
         json_line = None
         with open(self.centering_file, "a+") as f:
             prefix = key + "\t"
@@ -255,29 +256,30 @@ class FloodFeatureGraph(nn.Module):
                     break
 
             if json_line is not None:
-                print("Loaded from cache")
+                print("Loaded centering stats from cache.")
                 param_dictionary = json.loads(json_line)
             else:
-                print(f"Computing reference stats for {reference_pdb}")
-                param_dictionary = self._reference_stats(reference_pdb)
+                print(f"Computing centering stats for {reference_csv}")
+                param_dictionary = self._reference_stats(reference_csv)
                 json_line = json.dumps(param_dictionary)
                 f.write(prefix + "\t" + json_line + "\n")
 
+        # Register node feature means
         for i, layer in enumerate(self.node_layers):
             key = json.dumps(self.node_features[i])
             tensor = torch.tensor(param_dictionary[key], dtype=torch.float32)
             tensor = tensor.view(1, 1, -1)
             self.register_buffer(f"node_means_{i}", tensor)
 
+        # Register edge feature means
         for i, layer in enumerate(self.edge_layers):
             key = json.dumps(self.edge_features[i])
             tensor = torch.tensor(param_dictionary[key], dtype=torch.float32)
             tensor = tensor.view(1, 1, -1)
             self.register_buffer(f"edge_means_{i}", tensor)
-        return
 
-    def _reference_stats(self, reference_csv):
-        X, C, _ = Flood.Flood.from_csv("validation.csv", grid_size_m=100).to_XCD()
+    def _reference_stats(self, reference_csv="./datasets/validation.csv"):
+        X, C, _ = Flood.from_csv(reference_csv, grid_size_m=100).to_XCD()
         stats_dict = self._feature_stats(X, C)
         return stats_dict
     
@@ -404,9 +406,9 @@ class FloodGraph(nn.Module):
         if self.distance_grid_square_type > 0:
             X_grid_square = X[:, :, self.distance_grid_square_type, :]
         else:
-            X_grid_square = X.mean(dim=2)
+            X_grid_square = X.mean(dim=3)
         if custom_D is None:
-            D = self.distances(X_grid_square, dim=1)
+            D = self.distances(X_grid_square) #, dim=1)
         else:
             D = custom_D
 
@@ -839,7 +841,7 @@ class EdgeDistance6grid(nn.Module):
         self.distance_eps = distance_eps
         self.num_grid_square_types = num_grid_square_types
         self.layer_6grids = Edge6grids(require_contiguous=require_contiguous)
-        self.layer_distance = geometry.Distances()
+        self.layer_distance = geometry.GridDistances()
 
         # Public attribute
         self.dim_out = (6 * num_grid_square_types) ** 2
@@ -1290,8 +1292,8 @@ class EdgeRandomFourierFeatures2grid(nn.Module):
                 )
 
         self.layer_2grids = Edge2grids()
-        self.layer_distance = geometry.Distances()
-        self.frame_builder = backbone.FrameBuilder()
+        self.layer_distance = geometry.GridDistances()
+        self.frame_builder = backbone.FloodFrameBuilder()
         self.dim_out = dim_embedding
 
     def forward(
