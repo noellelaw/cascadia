@@ -49,24 +49,30 @@ class Flood:
     
     def to_XCD(self) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
-        Convert Flood object into X (flood input), C (conditioning: SLR, surge), and D_meta (e.g., land cover).
+        Convert Flood object into flattened X (flood input), C (conditioning), and D_meta (e.g., land cover).
 
         Returns:
-            X (torch.Tensor): Flood input features — e.g., depth, shape (B, H, W, 1)
-            C (torch.Tensor): Conditioning features — e.g., SLR, surge, shape (B, H, W, K)
-            D_meta (torch.Tensor): Metadata — e.g., land cover class, shape (B, H, W, M)
+            X (torch.Tensor): Flood input features — e.g., depth, shape (B, H*W, 1)
+            C (torch.Tensor): Conditioning features — e.g., SLR, surge, shape (B, H*W, K)
+            D_meta (torch.Tensor): Metadata — e.g., land cover class, shape (B, H*W, 1)
         """
-        # X: the flood depth field
-        X = self.depth.unsqueeze(-1)  # shape (B, H, W, 1)
+        B, H, W = self.depth.shape
 
-        # C: conditioning features — surge, SLR, etc.
+        # X: flood depth field
+        X = self.depth.unsqueeze(-1)          # (B, H, W, 1)
+        X = X.view(B, H * W, 1)               # (B, H*W, 1)
+
+        # C: conditioning features
         if self.meta is not None:
-            C = self.meta  # shape (B, H, W, K)
+            Bm, Hm, Wm, K = self.meta.shape
+            assert B == Bm and H == Hm and W == Wm, "Meta tensor shape mismatch."
+            C = self.meta.view(B, H * W, K)   # (B, H*W, K)
         else:
             raise ValueError("Expected 'meta' to contain SLR and meteorological data for conditioning.")
 
-        # D_meta: semantic/static metadata — e.g., land cover
-        D_meta = self.land_mask.unsqueeze(-1).float()  # shape (B, H, W, 1)
+        # D_meta: land cover
+        D_meta = self.land_mask.unsqueeze(-1).float()  # (B, H, W, 1)
+        D_meta = D_meta.view(B, H * W, 1)              # (B, H*W, 1)
 
         return X, C, D_meta
 
@@ -76,7 +82,7 @@ class Flood:
         return self
 
     @staticmethod
-    def from_csv(csv_path: str, grid_size_m: int = 100) -> "Flood":
+    def from_csv(csv_path: str, grid_size_m: int = 128) -> "Flood":
         """
         Load flood scenario tensors from a CSV describing (depth + landcover) rasters
         and SLR/meteorological conditioning metadata.

@@ -78,7 +78,7 @@ class Cascadia(nn.Module):
         self.backbone_network = graph_backbone.load_model(
             weights_backbone, device=device, strict=strict, verbose=verbose
         ).eval()
-
+        breakpoint()
         self.design_network = graph_design_for_flood_impact.load_model(
             weights_design,
             device=device,
@@ -188,7 +188,6 @@ class Cascadia(nn.Module):
 
         # Get KWARGS
         input_args = locals()
-
         # Dynamically get acceptable kwargs for each method
         backbone_keys = set(inspect.signature(self._sample).parameters)
         design_keys = set(inspect.signature(self.design).parameters)

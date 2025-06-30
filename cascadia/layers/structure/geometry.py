@@ -8,10 +8,10 @@ class GridDistances(nn.Module):
         self.eps = eps
 
     def forward(self, X: torch.Tensor, mask: torch.Tensor = None):
-        # X: (B, H, W) = coordinates or centroids
-        B, H, W = X.shape
-        X_flat = X.view(B, H * W, 1)
-        dist = torch.cdist(X_flat, X_flat, p=2).view(B, H, W, H, W)
+        # X: (B, H*W) = coordinates or centroids
+        B, HW = X.shape
+        X_flat = X.view(B, HW, 1)
+        dist = torch.cdist(X_flat, X_flat, p=2).view(B, HW, HW)
         if mask is not None:
             dist = dist * mask.unsqueeze(1).unsqueeze(1)
         return dist

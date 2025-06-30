@@ -406,7 +406,7 @@ class FloodGraph(nn.Module):
         if self.distance_grid_square_type > 0:
             X_grid_square = X[:, :, self.distance_grid_square_type, :]
         else:
-            X_grid_square = X.mean(dim=3)
+            X_grid_square = X.mean(dim=2)
         if custom_D is None:
             D = self.distances(X_grid_square) #, dim=1)
         else:
@@ -488,7 +488,6 @@ class FloodGraph(nn.Module):
                 return edge_idx.contiguous(), mask_ij.contiguous()
             else:
                 D = self._perturb_distances(D)
-
         edge_idx, edge_D, mask_ij = self.knn(D, mask_1D, mask_2D)
         return edge_idx, mask_ij
     
