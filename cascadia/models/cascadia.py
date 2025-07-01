@@ -14,7 +14,7 @@ Applications include:
 import copy
 import inspect
 from collections import defaultdict, namedtuple
-from typing import List, Literal, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Union, Generator
 
 import torch
 import torch.nn as nn
@@ -59,6 +59,7 @@ class Cascadia(nn.Module):
         weights_backbone: str = "none",
         weights_design: str = "none",
         device: Optional[str] = None,
+        mode: Literal["train", "eval", "sample"] = "sample",
         strict: bool = False,
         verbose: bool = False,
     ) -> None:
@@ -74,17 +75,16 @@ class Cascadia(nn.Module):
                 device = "cuda"
             else:
                 device = "cpu"
-
-        self.backbone_network = graph_backbone.load_model(
-            weights_backbone, device=device, strict=strict, verbose=verbose
-        ).eval()
-        breakpoint()
-        self.design_network = graph_design_for_flood_impact.load_model(
-            weights_design,
-            device=device,
-            strict=strict,
-            verbose=False,
-        ).eval()
+        if mode is "sample": # IWAS DOING SOMETHING HERE TO MAKE SOME DIFFERETIALTION  IN LOADING DATA BUT WILL RESUME LATEr
+            self.backbone_network = graph_backbone.load_model(
+                weights_backbone, device=device, strict=strict, verbose=verbose
+            ).eval()
+            self.design_network = graph_design_for_flood_impact.load_model(
+                weights_design,
+                device=device,
+                strict=strict,
+                verbose=False,
+            ).eval()
 
     def sample(
         self,
@@ -105,7 +105,7 @@ class Cascadia(nn.Module):
         full_output: bool = False,
         # Sidechain Args
         design_ban_S: Optional[List[str]] = None,
-        design_method: Literal["potts", "autoregressive"] = "potts",
+        design_method: Literal["potts", "autoregressive", "None"] = "None",
         design_selection: Optional[Union[str, torch.Tensor]] = None,
         design_t: Optional[float] = 0.5,
         temperature_S: float = 0.01,
@@ -204,7 +204,7 @@ class Cascadia(nn.Module):
         else:
             flood_sample = sample_output
             output_dictionary = None
-
+        breakpoint()
         # Perform Design
         if design_method is None:
             floods = flood_sample
@@ -274,117 +274,62 @@ class Cascadia(nn.Module):
         sde_func: Literal["langevin", "reverse_sde", "ode"] = "reverse_sde",
         trajectory_length: int = 200,
         full_output: bool = False,
+        tile_H: int = 32,
+        tile_W: int = 32,
+        overlap: int = 8,
         **kwargs,
     ) -> Union[
         Tuple[List[Flood], List[Flood]],
         Tuple[List[Flood], List[Flood], List[Flood], List[Flood]],
     ]:
-        """Samples backbones given chain lengths by integrating SDEs.
-
-        Args:
-            samples (int, optional): The number of floods to sample. Default is 1.
-            steps (int, optional): The number of integration steps for the SDE.
-                Default is 500.
-            grid_shapes (List[int], optional): The shape of the flood grid.
-                Default is [100].
-            conditioner (Conditioner, optional): The conditioner object that provides
-                the conditioning information. Default is None.
-            langevin_isothermal (bool, optional): Whether to use the isothermal version
-                of the Langevin SDE. Default is False.
-            integrate_func (str, optional): The name of the integration function to use.
-                Default is `euler_maruyama`.
-            sde_func (str, optional): The name of the SDE function to use. Default is
-                “reverse_sde”.
-            langevin_factor (float, optional): The factor that controls the strength of
-                the Langevin noise. Default is 2.
-            inverse_temperature (float, optional): The inverse temperature parameter
-                for the SDE. Default is 10.
-            flood_init (Flood, optional): The initial flood state. Default is
-                None.
-            full_output (bool, optional): Whether to return the full outputs of the SDE
-                integration, including Xhat and Xunc. Default is False.
-            initialize_noise (bool, optional): Whether to initialize the noise for the
-                SDE integration. Default is True.
-            tspan (List[float], optional): The time span for the SDE integration.
-                Default is (1.0, 0.001).
-            trajectory_length (int, optional): The number of sampled steps in the
-                trajectory output.  Maximum is `steps`. Default 200.
-            **kwargs: Additional keyword arguments for the integration function.
-
-        Returns:
-            floods: Sampled `Flood` object or list of  sampled `Flood` objects in
-                the case of multiple outputs.
-            full_output_dictionary (dict, optional): Additional outputs if
-                `full_output=True`.
         """
+        Samples floods tile-by-tile for memory efficiency.
+        """
+        if flood_init is None:
+            raise ValueError("flood_init must be provided for tiled sampling.")
 
-        if flood_init is not None:
-            X_unc, C_unc, D_unc = flood_init.to_XCD()
-        else:
-            X_unc, C_unc, D_unc = self._init_floods(samples, grid_shapes)
+        tile_floods = []
+        tile_outputs = []
 
-        outs = self.backbone_network.sample_sde(
-            C_unc,
-            X_init=X_unc,
-            conditioner=conditioner,
-            tspan=tspan,
-            langevin_isothermal=langevin_isothermal,
-            integrate_func=integrate_func,
-            sde_func=sde_func,
-            langevin_factor=langevin_factor,
-            inverse_temperature=inverse_temperature,
-            N=steps,
-            initialize_noise=initialize_noise,
-            **kwargs,
-        )
-
-        if D_unc.shape != outs["C"].shape:
-            D = torch.zeros_like(outs["C"]).long()
-        else:
-            D = D_unc
-
-        assert D.shape == outs["C"].shape
-
-        floods = [
-            Flood.from_XCD(outs_X[None, ...], outs_C[None, ...], outs_D[None, ...])
-            for outs_X, outs_C, outs_D in zip(outs["X_sample"], outs["C"], D)
-        ]
-        if samples == 1:
-            floods = floods[0]
-
-        if not full_output:
-            return floods
-        else:
-            outs["S"] = S
-            trajectories = self._format_trajectory(
-                outs, "X_trajectory", trajectory_length
+        # Loop through tiles
+        for X_tile, C_tile, D_tile in flood_init.to_XCD_tiled(tile_H=tile_H, tile_W=tile_W, overlap=overlap):
+            outs = self.backbone_network.sample_sde(
+                C_tile,
+                X_init=X_tile,
+                conditioner=conditioner,
+                tspan=tspan,
+                langevin_isothermal=langevin_isothermal,
+                integrate_func=integrate_func,
+                sde_func=sde_func,
+                langevin_factor=langevin_factor,
+                inverse_temperature=inverse_temperature,
+                N=steps,
+                initialize_noise=initialize_noise,
+                **kwargs,
             )
 
-            trajectories_Xhat = self._format_trajectory(
-                outs, "Xhat_trajectory", trajectory_length
-            )
-
-            # use unconstrained C and D for Xunc_trajectory
-            outs["D"] = D_unc
-            outs["C"] = C_unc
-            trajectories_Xunc = self._format_trajectory(
-                outs, "Xunc_trajectory", trajectory_length
-            )
+            # Build Flood objects from tile output
+            floods = [
+                Flood.from_XCD(outs_X[None, ...], outs_C[None, ...], outs_D[None, ...])
+                for outs_X, outs_C, outs_D in zip(outs["X_sample"], outs["C"], D_tile)
+            ]
 
             if samples == 1:
-                full_output_dictionary = {
-                    "trajectory": trajectories[0],
-                    "Xhat_trajectory": trajectories_Xhat[0],
-                    "Xunc_trajectory": trajectories_Xunc[0],
-                }
-            else:
-                full_output_dictionary = {
-                    "trajectory": trajectories,
-                    "Xhat_trajectory": trajectories_Xhat,
-                    "Xunc_trajectory": trajectories_Xunc,
-                }
+                floods = floods[0]
 
-            return floods, full_output_dictionary
+            tile_floods.append(floods)
+            if full_output:
+                tile_outputs.append(outs)
+
+        if not full_output:
+            return tile_floods
+        else:
+            # If full_output requested, aggregate trajectories per tile
+            full_output_dictionary = {
+                "tile_outputs": tile_outputs
+            }
+            return tile_floods, full_output_dictionary
+
 
     def _format_trajectory(self, outs, key, trajectory_length):
         trajectories = [

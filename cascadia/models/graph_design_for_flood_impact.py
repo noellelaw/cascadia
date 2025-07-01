@@ -1134,7 +1134,7 @@ class BackboneEncoderGNN(nn.Module):
         self.dim_nodes = dim_nodes
         self.dim_edges = dim_edges
         self.checkpoint_gradients = checkpoint_gradients
-
+        # breakpoint()
         graph_kwargs = {
             "distance_grid_square_type": args.graph_distance_grid_square_type,
             "cutoff": args.graph_cutoff,
@@ -1151,6 +1151,7 @@ class BackboneEncoderGNN(nn.Module):
             node_features=args.node_features,
             edge_features=args.edge_features,
         )
+        breakpoint()
 
         self.gnn = graph.GraphNN(
             dim_nodes=args.dim_nodes,

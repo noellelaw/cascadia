@@ -111,7 +111,7 @@ def process_raster_row(depth_path, landcover_path, slr, grid_size=512):
                 })
     return pd.DataFrame(records)
 
-def process_csv(csv_path, grid_size_m=512):
+def process_csv(csv_path):
     df_inputs = pd.read_csv(csv_path)
     root_dir = os.path.dirname(os.path.abspath(csv_path))  # Determine root directory of the CSV
     all_results = []

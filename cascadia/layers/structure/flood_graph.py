@@ -121,7 +121,6 @@ class FloodFeatureGraph(nn.Module):
         centered_pdb: str = "./datasets/validation.csv",
     ):
         super(FloodFeatureGraph, self).__init__()
-
         self.dim_nodes = dim_nodes
         self.dim_edges = dim_edges
         self.num_neighbors = num_neighbors
@@ -138,6 +137,7 @@ class FloodFeatureGraph(nn.Module):
             return layer_dict[key](**kwargs)
 
         # Node feature compilation
+        # breakpoint()
         node_dict = {
             "internal_coords": FloodNodeInternalCoords,
             "cartesian_coords": NodeCartesianCoords,
@@ -146,6 +146,7 @@ class FloodFeatureGraph(nn.Module):
         self.node_layers = nn.ModuleList(
             [_init_layer(node_dict, option) for option in self.node_features]
         )
+        # breakpoint()
         # Edge feature compilation
         edge_dict = {
             "distances_6grid": EdgeDistance6grid,
@@ -160,12 +161,13 @@ class FloodFeatureGraph(nn.Module):
         self.edge_layers = nn.ModuleList(
             [_init_layer(edge_dict, option) for option in self.edge_features]
         )
-
         # Load feature centering params as buffers
         self.centered = centered
         self.centered_pdb = centered_pdb.lower()
+        # breakpoint()
         if self.centered:
             self._load_centering_params(self.centered_pdb)
+        breakpoint()
 
         """
             Storing separate linear transformations for each layer, rather than concat + one
@@ -263,7 +265,6 @@ class FloodFeatureGraph(nn.Module):
                 param_dictionary = self._reference_stats(reference_csv)
                 json_line = json.dumps(param_dictionary)
                 f.write(prefix + "\t" + json_line + "\n")
-
         # Register node feature means
         for i, layer in enumerate(self.node_layers):
             key = json.dumps(self.node_features[i])
@@ -279,13 +280,19 @@ class FloodFeatureGraph(nn.Module):
             self.register_buffer(f"edge_means_{i}", tensor)
 
     def _reference_stats(self, reference_csv="./datasets/validation.csv"):
-        X, C, _ = Flood.from_csv(reference_csv, grid_size_m=100).to_XCD()
-        stats_dict = self._feature_stats(X, C)
-        return stats_dict
-    
+        stats_dict_list = []
+        # TODO: MAKE THIS PASSED IN
+        H, W, overlap = 32, 32, 16
+        for X_tile, C_tile, D_tile in Flood.to_XCD_tiled(tile_H=H, tile_W=W, overlap=overlap):
+            stats_dict_list.append(self._feature_stats(X_tile, C_tile))
+        breakpoint()
+        return stats_dict_list
+
     def _feature_stats(self, X, C, verbose=False, center=False):
         mask_i = field_map_to_mask(C)
+        # breakpoint()
         edge_idx, mask_ij = self.graph_builder(X, C)
+        breakpoint()
 
         def _masked_stats(feature, mask, dims, verbose=False):
             mask = mask.unsqueeze(-1)
@@ -374,7 +381,7 @@ class FloodGraph(nn.Module):
 
     def __init__(
         self,
-        num_neighbors: int = 30,
+        num_neighbors: int = 5,
         distance_grid_square_type: int = -1,
         cutoff: Optional[float] = None,
         mask_interfaces: bool = False,
@@ -391,8 +398,8 @@ class FloodGraph(nn.Module):
         self.cutoff = cutoff
         self.mask_interfaces = mask_interfaces
         self.distances = geometry.GridDistances()
+        # breakpoint()
         self.knn = kNN(k_neighbors=num_neighbors)
-
         self.criterion = criterion
         self.random_alpha = random_alpha
         self.random_temperature = random_temperature
@@ -401,17 +408,21 @@ class FloodGraph(nn.Module):
         self.deterministic_seed = deterministic_seed
 
     def _mask_distances(self, X, C, custom_D=None, custom_mask_2D=None):
+        breakpoint()
         mask_1D = field_map_to_mask(C)
+        breakpoint()
         mask_2D = mask_1D.unsqueeze(2) * mask_1D.unsqueeze(1)
+        breakpoint()
         if self.distance_grid_square_type > 0:
             X_grid_square = X[:, :, self.distance_grid_square_type, :]
         else:
             X_grid_square = X.mean(dim=2)
+        breakpoint()
         if custom_D is None:
             D = self.distances(X_grid_square) #, dim=1)
         else:
             D = custom_D
-
+        breakpoint()
         if custom_mask_2D is None:
             if self.mask_interfaces:
                 mask_2D = torch.eq(C.unsqueeze(1), C.unsqueeze(2))
@@ -421,6 +432,7 @@ class FloodGraph(nn.Module):
                 mask_2D = mask_cutoff * mask_2D
         else:
             mask_2D = custom_mask_2D
+        breakpoint()
         return D, mask_1D, mask_2D
 
     def _perturb_distances(self, D):
@@ -457,11 +469,13 @@ class FloodGraph(nn.Module):
         custom_D: Optional[torch.Tensor] = None,
         custom_mask_2D: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.LongTensor, torch.Tensor]:
+        #breakpoint()
         D, mask_1D, mask_2D = self._mask_distances(X, C, custom_D, custom_mask_2D)
-
+        breakpoint()
         if self.criterion != "knn":
             if self.random_min_local > 0:
                 # Build first k-NN graph (local)
+                breakpoint()
                 self.knn.k_neighbors = self.random_min_local
                 edge_idx_local, _, mask_ij_local = self.knn(D, mask_1D, mask_2D)
 
@@ -533,6 +547,7 @@ class kNN(nn.Module):
             mask_full = mask_2D if mask_full is None else mask_full * mask_2D
         if mask_full is not None:
             max_float = np.finfo(np.float32).max
+            breakpoint()
             D = mask_full * D + (1.0 - mask_full) * max_float
 
         k = min(self.k_neighbors, D.shape[-1])
@@ -1468,6 +1483,7 @@ def field_map_to_mask(C: torch.LongTensor) -> torch.Tensor:
         mask (Tensor, optional): Mask tensor with shape
             `(num_batch, num_residues)`.
     """
+    breakpoint()
     return (C > 0).type(torch.float32)
 
 

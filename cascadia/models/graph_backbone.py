@@ -107,9 +107,10 @@ class GraphBackbone(nn.Module):
                 self.kwargs.pop(key)
         args = SimpleNamespace(**self.kwargs)
         # Important global options
-        self.dim_nodes = args.dim_nodes
-        self.dim_edges = args.dim_edges
-
+        #TODO FIGURE OUT HOW TO PASS THESE IN
+        self.dim_nodes = 32 #args.dim_nodes
+        self.dim_edges = 32 #args.dim_edges
+        # breakpoint()
         # Encoder GNN process backbone
         self.num_graph_cycles = args.num_graph_cycles
         self.encoders = nn.ModuleList(
@@ -136,7 +137,7 @@ class GraphBackbone(nn.Module):
                 for i in range(self.num_graph_cycles)
             ]
         )
-
+        breakpoint()
         self.backbone_updates = nn.ModuleList(
             [
                 backbone.GraphBackboneUpdate(
